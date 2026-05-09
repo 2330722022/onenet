@@ -268,7 +268,7 @@ static void onenet_cmd_rsp_cb(uint8_t *recv_data, size_t recv_size, uint8_t **re
     }
     
     /* 最快响应：直接构造JSON字符串 */
-    rt_sprintf(resp_json, "{\"id\":%d,\"code\":200,\"msg\":\"success\"}", request_id);
+    rt_sprintf(resp_json, "{\"id\":\"%d\",\"code\":200,\"msg\":\"success\"}", request_id);
     
     /* 返回响应 */
     *resp_data = (uint8_t *)rt_malloc(strlen(resp_json) + 1);
