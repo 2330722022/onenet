@@ -314,7 +314,7 @@ static void wlan_event_callback(int event, struct rt_wlan_buff *buff, void *para
             rt_kprintf("WiFi: disconnected from AP\n");
             wifi_connected = 0;
             /* 尝试自动重连 */
-            rt_wlan_connect(WIFI_SSID, WIFI_PASSWORD);
+            rt_wlan_connect(WLAN_SSID, WLAN_PASSWORD);
             break;
         case RT_WLAN_EVT_STA_GOT_IP:
             rt_kprintf("WiFi: got IP address\n");
