@@ -219,6 +219,9 @@ static void key_thread_entry(void *parameter)
     }
 }
 
+/* WiFi事件回调函数前向声明 */
+static void wlan_event_callback(int event, struct rt_wlan_buff *buff, void *parameter);
+
 /* ==================== WiFi连接函数 ==================== */
 static int wifi_connect(void)
 {
@@ -227,9 +230,6 @@ static int wifi_connect(void)
     /* 注册WiFi事件回调 */
     rt_wlan_register_event_handler(RT_WLAN_EVT_STA_CONNECTED, wlan_event_callback, RT_NULL);
     rt_wlan_register_event_handler(RT_WLAN_EVT_STA_DISCONNECTED, wlan_event_callback, RT_NULL);
-    rt_wlan_register_event_handler(RT_WLAN_EVT_STA_GOT_IP, wlan_event_callback, RT_NULL);
-    rt_wlan_register_event_handler(RT_WLAN_EVT_STA_START, wlan_event_callback, RT_NULL);
-    rt_wlan_register_event_handler(RT_WLAN_EVT_STA_STOP, wlan_event_callback, RT_NULL);
 
     /* 连接WiFi - 忽略返回值，因为它是异步的 */
     rt_wlan_connect(WLAN_SSID, WLAN_PASSWORD);
@@ -313,19 +313,7 @@ static void wlan_event_callback(int event, struct rt_wlan_buff *buff, void *para
         case RT_WLAN_EVT_STA_DISCONNECTED:
             rt_kprintf("WiFi: disconnected from AP\n");
             wifi_connected = 0;
-            /* 尝试自动重连 */
             rt_wlan_connect(WLAN_SSID, WLAN_PASSWORD);
-            break;
-        case RT_WLAN_EVT_STA_GOT_IP:
-            rt_kprintf("WiFi: got IP address\n");
-            wifi_connected = 1;
-            break;
-        case RT_WLAN_EVT_STA_START:
-            rt_kprintf("WiFi: STA started\n");
-            break;
-        case RT_WLAN_EVT_STA_STOP:
-            rt_kprintf("WiFi: STA stopped\n");
-            wifi_connected = 0;
             break;
         default:
             break;
@@ -338,9 +326,7 @@ static void onenet_upload_thread_entry(void *parameter)
     struct sensor_data data;
     rt_err_t result;
     int upload_count = 0;
-    cJSON *root = RT_NULL;
-    cJSON *params = RT_NULL;
-    char *json_str = RT_NULL;
+    char json_buf[128];
 
     rt_kprintf("OneNET upload thread: started\n");
 
@@ -359,53 +345,24 @@ static void onenet_upload_thread_entry(void *parameter)
         data = shared_data;
         rt_mutex_release(data_mutex);
 
-        /* 使用cJSON构建OneNET物模型标准格式JSON数据 */
-        root = cJSON_CreateObject();
-        if (root)
-        {
-            cJSON_AddStringToObject(root, "id", "123");
-            cJSON_AddStringToObject(root, "version", "1.0");
-            
-            params = cJSON_CreateObject();
-            if (params)
-            {
-                cJSON_AddNumberToObject(params, "humidity", data.humidity);
-                cJSON_AddNumberToObject(params, "light", data.light);
-                cJSON_AddItemToObject(root, "params", params);
-            }
-            
-            cJSON_AddStringToObject(root, "method", "thing.property.post");
-            
-            json_str = cJSON_PrintUnformatted(root);
-        }
+        /* 使用rt_sprintf构建OneNET物模型标准格式JSON数据 */
+        int humidity_int = (int)(data.humidity * 10);
+        int light_int = (int)data.light;
+        rt_sprintf(json_buf, "{\"id\":\"123\",\"version\":\"1.0\",\"params\":{\"humidity\":{\"value\":%d.%d},\"light\":{\"value\":%d}},\"method\":\"thing.property.post\"}",
+                   humidity_int / 10, humidity_int % 10, light_int);
 
         /* 在串口打印要发送的JSON */
-        if (json_str)
-        {
-            rt_kprintf("OneNET: sending JSON: %s\n", json_str);
+        rt_kprintf("OneNET: sending JSON: %s\n", json_buf);
 
-            /* 使用MQTT直接发布到物模型上传topic（跳过库的自动封装） */
-            result = onenet_mqtt_publish("$sys/67k36rzgOO/test1/thing/property/post", (uint8_t *)json_str, strlen(json_str));
-            if (result == 0)
-            {
-                rt_kprintf("OneNET: upload success\n");
-            }
-            else
-            {
-                rt_kprintf("OneNET: upload failed, ret=%d\n", result);
-            }
-            
-            /* 释放JSON字符串内存 */
-            rt_free(json_str);
-            json_str = RT_NULL;
-        }
-        
-        /* 释放cJSON对象 */
-        if (root)
+        /* 使用MQTT直接发布到物模型上传topic（跳过库的自动封装） */
+        result = onenet_mqtt_publish("$sys/67k36rzgOO/test1/thing/property/post", (uint8_t *)json_buf, rt_strlen(json_buf));
+        if (result == 0)
         {
-            cJSON_Delete(root);
-            root = RT_NULL;
-            params = RT_NULL;
+            rt_kprintf("OneNET: upload success\n");
+        }
+        else
+        {
+            rt_kprintf("OneNET: upload failed, ret=%d\n", result);
         }
 
         upload_count++;
