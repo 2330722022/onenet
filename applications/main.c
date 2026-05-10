@@ -369,6 +369,7 @@ static void display_thread_entry(void *parameter)
     char buf[32];
     static int beep_on = 0;
     static int blink_count = 0;
+    static int last_beep_flag = 0;
 
     /* 初始化LVGL界面 */
     warehouse_ui_init();
@@ -407,8 +408,14 @@ static void display_thread_entry(void *parameter)
             lv_img_set_src(img_wifi_status, &connected);
         }
 
+        /* 处理蜂鸣器控制（按键标志驱动） */
+        if (beep_control_flag != last_beep_flag) {
+            last_beep_flag = beep_control_flag;
+            rt_pin_write(BEEP_PIN, beep_control_flag ? PIN_HIGH : PIN_LOW);
+        }
+
         /* 更新蜂鸣器状态图标闪烁 */
-        beep_on = (rt_pin_read(BEEP_PIN) == PIN_HIGH) ? 1 : 0;
+        beep_on = beep_control_flag;
         blink_count++;
         if (beep_on && (blink_count % 10) < 5) {
             lv_obj_clear_flag(img_beep_status, LV_OBJ_FLAG_HIDDEN);
@@ -445,6 +452,9 @@ static void display_thread_entry(void *parameter)
 }
 
 /* ==================== 按键处理 ==================== */
+/* 按键状态标志 - 用于线程间通信 */
+static volatile int beep_control_flag = 0;  // 0=关闭, 1=打开
+
 static void key_irq_callback(void *args)
 {
     rt_sem_release(key_sem);   // 释放信号量，通知按键线程
@@ -452,24 +462,19 @@ static void key_irq_callback(void *args)
 
 static void key_thread_entry(void *parameter)
 {
-    int beep_on = 0;   // beep状态：0=关，1=开
     while (1)
     {
         rt_sem_take(key_sem, RT_WAITING_FOREVER);
         /* 消抖延时 20ms */
         rt_thread_mdelay(20);
         if (rt_pin_read(KEY_WK_UP) == PIN_LOW) {
-            /* 切换状态 */
-            beep_on = !beep_on;
-            if (beep_on) {
-                rt_pin_write(BEEP_PIN, PIN_HIGH);
-                rt_kprintf("Key pressed: beep ON\n");
-            } else {
-                rt_pin_write(BEEP_PIN, PIN_LOW);
-                rt_kprintf("Key pressed: beep OFF\n");
-            }
-            /* 等待按键松开 */
-            while (rt_pin_read(KEY_WK_UP) == PIN_LOW) {
+            /* 切换状态标志 */
+            beep_control_flag = !beep_control_flag;
+            rt_kprintf("Key pressed: beep %s\n", beep_control_flag ? "ON" : "OFF");
+            
+            /* 等待按键松开 - 使用延时轮询 */
+            for (int i = 0; i < 100; i++) {  // 最多等待1秒
+                if (rt_pin_read(KEY_WK_UP) != PIN_LOW) break;
                 rt_thread_mdelay(10);
             }
         }
@@ -633,29 +638,38 @@ static void onenet_upload_thread_entry(void *parameter)
 /* ==================== 系统初始化 ==================== */
 static void system_init(void)
 {
-    /* 1. 初始化 LED、蜂鸣器引脚 */
+    /* 1. 创建互斥量（保护共享数据）- 必须最先创建！ */
+    data_mutex = rt_mutex_create("data_mutex", RT_IPC_FLAG_FIFO);
+    if (data_mutex == RT_NULL)
+    {
+        rt_kprintf("IPC create failed!\n");
+        return;
+    }
+
+    /* 2. 初始化 LED、蜂鸣器引脚 */
     rt_pin_mode(LED_R_PIN, PIN_MODE_OUTPUT);
     rt_pin_mode(BEEP_PIN, PIN_MODE_OUTPUT);
     rt_pin_write(LED_R_PIN, PIN_HIGH);
     rt_pin_write(BEEP_PIN, PIN_LOW);
 
-    /* 1.5. 初始化舵机 */
+    /* 3. 初始化舵机 */
     if (servo_init() != 0)
     {
         rt_kprintf("Servo init failed!\n");
     }
 
-    /* 2. 初始化按键（中断 + 信号量 + 线程） */
+    /* 4. 初始化按键（中断 + 信号量 + 线程） */
     key_sem = rt_sem_create("key_sem", 0, RT_IPC_FLAG_FIFO);
-    rt_thread_t tid_key = rt_thread_create("key", key_thread_entry, RT_NULL,
-                                            1024, 22, 10);
-    if (tid_key) rt_thread_startup(tid_key);
-
+    
     rt_pin_mode(KEY_WK_UP, PIN_MODE_INPUT_PULLUP);
     rt_pin_attach_irq(KEY_WK_UP, PIN_IRQ_MODE_FALLING, key_irq_callback, RT_NULL);
     rt_pin_irq_enable(KEY_WK_UP, PIN_IRQ_ENABLE);
 
-    /* 3. 初始化传感器 */
+    rt_thread_t tid_key = rt_thread_create("key", key_thread_entry, RT_NULL,
+                                            1024, 22, 10);
+    if (tid_key) rt_thread_startup(tid_key);
+
+    /* 5. 初始化传感器 */
     aht20_dev = aht10_init("i2c3");
     ap3216c_dev = ap3216c_init("i2c2");
     
@@ -678,21 +692,13 @@ static void system_init(void)
         return;
     }
 
-    /* 4. 创建互斥量（保护共享数据）和消息队列（LCD -> MQTT） */
-    data_mutex = rt_mutex_create("data_mutex", RT_IPC_FLAG_FIFO);
-    if (data_mutex == RT_NULL)
-    {
-        rt_kprintf("IPC create failed!\n");
-        return;
-    }
-
-    /* 4.5. 初始化 LVGL */
+    /* 6. 初始化 LVGL */
     rt_kprintf("Initializing LVGL...\n");
     lv_init();
     lv_port_disp_init();
     rt_kprintf("LVGL initialized successfully!\n");
 
-    /* 5. 创建采集线程和显示线程 */
+    /* 7. 创建采集线程和显示线程 */
     rt_thread_t tid_sensor = rt_thread_create("sensor", sensor_thread_entry, RT_NULL,
                                                2048, 20, 10);
     rt_thread_t tid_display = rt_thread_create("display", display_thread_entry, RT_NULL,
