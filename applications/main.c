@@ -27,6 +27,9 @@
     #include "lvgl/lvgl.h"
 #endif
 
+/* LVGL显示驱动初始化函数声明 */
+void lv_port_disp_init(void);
+
 /* 声明中文字库 */
 LV_FONT_DECLARE(my_font_cn_16);
 
@@ -134,8 +137,12 @@ static aht10_device_t aht20_dev = RT_NULL;
 static ap3216c_device_t ap3216c_dev = RT_NULL;
 static icm20608_device_t icm20608_dev = RT_NULL;
 
-/* 按键信号量 */
-static rt_sem_t key_sem = RT_NULL;
+/* 按键控制标志 - 用于线程间通信 */
+static volatile int beep_control_flag = 0;  // 0=关闭, 1=打开
+
+/* 系统事件定义 */
+#define EVENT_BEEP_TOGGLE (1 << 0)
+static struct rt_event system_event;
 
 /* ==================== 倾斜角度计算函数 ==================== */
 static void calculate_tilt_angle(rt_int16_t accel_x, rt_int16_t accel_y, rt_int16_t accel_z, 
@@ -254,9 +261,12 @@ static void sensor_thread_entry(void *parameter)
         }
         
         /* 更新共享数据区（加锁） */
+        rt_kprintf("[sensor] Taking data_mutex...\n");
         rt_mutex_take(data_mutex, RT_WAITING_FOREVER);
+        rt_kprintf("[sensor] Got data_mutex, updating shared_data...\n");
         shared_data = data;
         rt_mutex_release(data_mutex);
+        rt_kprintf("[sensor] Released data_mutex\n");
 
         rt_thread_mdelay(2000);
     }
@@ -295,10 +305,10 @@ static void warehouse_ui_init(void) {
     lv_label_set_text(title, "仓库环境监测");
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 10, 10);
 
-    /* 3. 数据展示区：温度 */
+    /* 3. 数据展示区：温度（向下移动避免遮挡标题） */
     lv_obj_t *img_temp = lv_img_create(scr);
     lv_img_set_src(img_temp, &Environmental);
-    lv_obj_align(img_temp, LV_ALIGN_LEFT_MID, 15, -60);
+    lv_obj_align(img_temp, LV_ALIGN_TOP_LEFT, 15, 45);  // 从顶部向下45像素
 
     label_temp_val = lv_label_create(scr);
     lv_obj_set_style_text_font(label_temp_val, &lv_font_montserrat_18, 0);
@@ -369,7 +379,7 @@ static void display_thread_entry(void *parameter)
     char buf[32];
     static int beep_on = 0;
     static int blink_count = 0;
-    static int last_beep_flag = 0;
+    rt_uint32_t recved;
 
     /* 初始化LVGL界面 */
     warehouse_ui_init();
@@ -377,9 +387,12 @@ static void display_thread_entry(void *parameter)
     while (1)
     {
         /* 读取共享数据（加锁） */
+        rt_kprintf("[display] Taking data_mutex...\n");
         rt_mutex_take(data_mutex, RT_WAITING_FOREVER);
+        rt_kprintf("[display] Got data_mutex, reading shared_data...\n");
         data = shared_data;
         rt_mutex_release(data_mutex);
+        rt_kprintf("[display] Released data_mutex\n");
 
         /* 更新温度显示 */
         rt_sprintf(buf, "%d.%d C", (int)data.temperature, 
@@ -408,10 +421,12 @@ static void display_thread_entry(void *parameter)
             lv_img_set_src(img_wifi_status, &connected);
         }
 
-        /* 处理蜂鸣器控制（按键标志驱动） */
-        if (beep_control_flag != last_beep_flag) {
-            last_beep_flag = beep_control_flag;
+        /* 处理蜂鸣器控制（事件驱动） */
+        if (rt_event_recv(&system_event, EVENT_BEEP_TOGGLE, RT_EVENT_FLAG_OR | RT_EVENT_FLAG_CLEAR, 
+                          0, &recved) == RT_EOK) {
+            beep_control_flag = !beep_control_flag;
             rt_pin_write(BEEP_PIN, beep_control_flag ? PIN_HIGH : PIN_LOW);
+            rt_kprintf("[display] BEEP toggled: %s\n", beep_control_flag ? "ON" : "OFF");
         }
 
         /* 更新蜂鸣器状态图标闪烁 */
@@ -447,38 +462,14 @@ static void display_thread_entry(void *parameter)
         /* LVGL任务处理 */
         lv_task_handler();
         
-        rt_thread_mdelay(500);
+        rt_thread_mdelay(200);  // UI降频到200ms刷新
     }
 }
 
 /* ==================== 按键处理 ==================== */
-/* 按键状态标志 - 用于线程间通信 */
-static volatile int beep_control_flag = 0;  // 0=关闭, 1=打开
-
 static void key_irq_callback(void *args)
 {
-    rt_sem_release(key_sem);   // 释放信号量，通知按键线程
-}
-
-static void key_thread_entry(void *parameter)
-{
-    while (1)
-    {
-        rt_sem_take(key_sem, RT_WAITING_FOREVER);
-        /* 消抖延时 20ms */
-        rt_thread_mdelay(20);
-        if (rt_pin_read(KEY_WK_UP) == PIN_LOW) {
-            /* 切换状态标志 */
-            beep_control_flag = !beep_control_flag;
-            rt_kprintf("Key pressed: beep %s\n", beep_control_flag ? "ON" : "OFF");
-            
-            /* 等待按键松开 - 使用延时轮询 */
-            for (int i = 0; i < 100; i++) {  // 最多等待1秒
-                if (rt_pin_read(KEY_WK_UP) != PIN_LOW) break;
-                rt_thread_mdelay(10);
-            }
-        }
-    }
+    rt_event_send(&system_event, EVENT_BEEP_TOGGLE);  // 按键回调只发信号
 }
 
 /* WiFi事件回调函数前向声明 */
@@ -646,6 +637,9 @@ static void system_init(void)
         return;
     }
 
+    /* 1.5. 创建系统事件对象 */
+    rt_event_init(&system_event, "sys_event", RT_IPC_FLAG_FIFO);
+
     /* 2. 初始化 LED、蜂鸣器引脚 */
     rt_pin_mode(LED_R_PIN, PIN_MODE_OUTPUT);
     rt_pin_mode(BEEP_PIN, PIN_MODE_OUTPUT);
@@ -658,16 +652,10 @@ static void system_init(void)
         rt_kprintf("Servo init failed!\n");
     }
 
-    /* 4. 初始化按键（中断 + 信号量 + 线程） */
-    key_sem = rt_sem_create("key_sem", 0, RT_IPC_FLAG_FIFO);
-    
+    /* 4. 初始化按键（中断 + 事件） */
     rt_pin_mode(KEY_WK_UP, PIN_MODE_INPUT_PULLUP);
     rt_pin_attach_irq(KEY_WK_UP, PIN_IRQ_MODE_FALLING, key_irq_callback, RT_NULL);
     rt_pin_irq_enable(KEY_WK_UP, PIN_IRQ_ENABLE);
-
-    rt_thread_t tid_key = rt_thread_create("key", key_thread_entry, RT_NULL,
-                                            1024, 22, 10);
-    if (tid_key) rt_thread_startup(tid_key);
 
     /* 5. 初始化传感器 */
     aht20_dev = aht10_init("i2c3");
