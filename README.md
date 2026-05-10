@@ -1,115 +1,151 @@
-# LED 闪烁例程
+# 仓库环境监测系统
 
-## 简介
+基于 RT-Thread 和 STM32F407 的智能仓库环境监测系统
 
-本例程作为 SDK 的第一个例程，也是最简单的例程，类似于程序员接触的第一个程序 Hello World 一样简洁。它的主要功能是让板载的 RGB-LED 中的红色 LED 不间断闪烁。
+## 项目简介
 
-## 硬件说明
+本项目实现了一个基于嵌入式系统的仓库环境监测解决方案，集成了温湿度监测、光照检测、货架倾斜监测、舵机控制、LCD 显示和云端上传等功能。
 
-![LED 连接单片机引脚](figures/led_pin.png)
+## 硬件平台
 
-![LED 电路原理图](figures/led_circuit.png)
+- **主控芯片**: STM32F407
+- **屏幕**: ST7789 240x240 LCD
+- **传感器**:
+  - AHT10 - 温湿度传感器
+  - BH1750 - 光照传感器
+  - ICM20608 - 六轴加速度计（货架倾斜监测）
+- **执行器**:
+  - 舵机（SG3115MG）
+  - 蜂鸣器
 
-如上图所示，RBG-LED 属于共阳 LED ，阴极分别与单片机的引脚连接，其中红色 LED 对应 PF12 引脚。单片机引脚输出低电平即可点亮 LED ，输出高电平则会熄灭 LED。
+## 功能特性
 
-LED 在开发板中的位置如下图所示：
+### 环境监测
+- 实时监测仓库温度和湿度
+- 光照强度检测
+- LCD 实时显示监测数据
 
-![LED 位置](figures/red_light.jpg)
+### 倾斜监测
+- 使用 ICM20608 加速度计监测货架 X/Y 轴倾斜角度
+- 倾斜角度超过 15° 时触发报警
+- 倾斜状态实时显示在 LCD 屏幕
 
-## 软件说明
+### 舵机控制
+- 基于 PWM 信号控制舵机角度（0°-180°）
+- 优化 PWM 输出，减少信号抖动
 
-本例程的源码位于 `/projects/02_basic_led_blink`。
+### 显示界面
+- LVGL 图形界面
+- 中文字库支持
+- 传感器数据图标化展示
+- 报警状态实时更新
 
-闪灯的源代码位于 applications/main.c 中。首先定义了一个宏 LED_PIN ，代表闪灯的 LED 引脚编号，然后与 PIN_LED_R（PF12）对应：
+### 云端通信
+- OneNET 物联网平台数据上传
+- MQTT 协议通信
+- 监测数据实时同步
+
+### 报警功能
+- 温度过高报警
+- 货架倾斜报警
+- 蜂鸣器声音提示
+- LCD 视觉报警
+
+## 软件架构
+
+```
+applications/
+├── main.c              # 主程序入口
+├── lv_port_disp.c      # LVGL 显示驱动适配
+├── my_font_cn_16.c     # 中文字库
+├── Alarm.c             # 报警图标
+├── Environmental.c     # 温度图标
+├── Megaphone.c          # 蜂鸣器图标
+├── connected.c         # WiFi 连接图标
+├── light.c             # 光照图标
+├── onenet_upload.c     # 上传图标
+├── tilt.c              # 倾斜图标
+└── waterprof.c         # 湿度图标
+```
+
+## 温湿度计算公式
 
 ```c
-/* 配 置 LED 灯 引 脚 */
-#define LED_PIN PIN_LED_R
+// 温度计算 (AHT10)
+float temperature = (temp_data / 1048576.0) * 50.0 - 24.0;
+
+// 湿度计算 (AHT10)
+float humidity = (humi_data / 1048576.0) * 100.0;
 ```
 
-在 main 函数中，将该引脚配置为输出模式，并在下面的 while 循环中，周期性（500 毫秒）开关 LED，同时输出一些日志信息。
+## 倾斜角度计算
+
+使用 ICM20608 加速度计数据，通过 atan2 函数计算倾斜角度：
 
 ```c
-#include <rtthread.h>
-#include <rtdevice.h>
-#include <board.h>
-
-#define DBG_TAG "main"
-#define DBG_LVL         DBG_LOG
-#include <rtdbg.h>
-
-/* 配置 LED 灯引脚 */
-#define PIN_LED_B              GET_PIN(F, 11)      // PF11 :  LED_B        --> LED
-#define PIN_LED_R              GET_PIN(F, 12)      // PF12 :  LED_R        --> LED
-
-int main(void)
-{
-    unsigned int count = 1;
-
-    /* 设置 LED 引脚为输出模式 */
-    rt_pin_mode(PIN_LED_R, PIN_MODE_OUTPUT);
-
-    while (count > 0)
-    {
-        /* LED 灯亮 */
-        rt_pin_write(PIN_LED_R, PIN_LOW);
-        LOG_D("led on, count: %d", count);
-        rt_thread_mdelay(500);
-
-        /* LED 灯灭 */
-        rt_pin_write(PIN_LED_R, PIN_HIGH);
-        LOG_D("led off");
-        rt_thread_mdelay(500);
-
-        count++;
-    }
-
-    return 0;
-}
-
+angle_x = atan2(accel_y, accel_z) * 180 / PI;
+angle_y = atan2(accel_x, accel_z) * 180 / PI;
 ```
 
-##  运行
+## 配置说明
 
-### 编译 & 下载
+### 舵机配置
+- PWM 通道: TIM3_CH2 (PA7)
+- 频率: 50Hz
+- 周期: 20ms (20000000ns)
+- 脉宽范围: 500-2500μs (500000-2500000ns)
 
-- RT-Thread Studio：在 RT-Thread Studio 的包管理器中下载 `STM32F407-RT-SPARK` 资源包，然后创建新工程，执行编译。
-- MDK：首先双击 mklinks.bat，生成 rt-thread 与 libraries 文件夹链接；再使用 Env 生成 MDK5 工程；最后双击 project.uvprojx 打开 MDK5 工程，执行编译。
+### 报警阈值
+- 温度报警: > 35°C
+- 倾斜报警: X 或 Y 轴 > 15°
 
-### 运行效果
+## 编译说明
 
-按下复位按键重启开发板，观察开发板上 RBG-LED 的实际效果。正常运行后，红色 LED 会周期性闪烁，如下图所示：
+本项目使用 RT-Thread Studio IDE 进行开发：
 
-![红灯亮起](figures/red_light.jpg)
+1. 使用 RT-Thread Studio 打开项目
+2. 配置好开发板驱动
+3. 点击编译并下载到开发板
 
-此时也可以在 PC 端使用终端工具打开开发板的 ST-Link 提供的虚拟串口，设置 115200 8 1 N 。开发板的运行日志信息即可实时输出出来。
+## 目录结构
 
 ```
-[D/main] led on, count: 1
-[D/main] led off
-[D/main] led on, count: 2
-[D/main] led off
-[D/main] led on, count: 3
-[D/main] led off
-[D/main] led on, count: 4
-[D/main] led off
-[D/main] led on, count: 5
-[D/main] led off
-[D/main] led on, count: 6
-[D/main] led off
-[D/main] led on, count: 7
-[D/main] led off
-[D/main] led on, count: 8
+onenet/
+├── applications/          # 应用代码
+├── packages/             # RT-Thread 软件包
+│   ├── aht10-latest/     # AHT10 驱动
+│   ├── bh1750-latest/    # BH1750 驱动
+│   ├── icm20608-latest/  # ICM20608 驱动
+│   └── LVGL-v8.3.11/     # LVGL 图形库
+├── rtconfig.h            # RT-Thread 配置
+└── README.md             # 项目说明文档
 ```
 
-## 注意事项
+## 界面预览
 
-如果想要修改 LED_PIN 宏定义，可以参考 /drivers/drv_gpio.h 文件，该文件中里有定义单片机的其它引脚编号。
+LCD 显示界面包含以下区域：
+- **顶部**: WiFi 状态图标、OneNET 上传图标、中文标题
+- **中部**: 温度、湿度、光照、倾斜角度数据展示
+- **底部**: 报警状态、蜂鸣器状态、警报图标
 
-## 引用参考
+## 未来改进
 
-- 设备与驱动：[PIN 设备](https://www.rt-thread.org/document/site/#/rt-thread-version/rt-thread-standard/programming-manual/device/pin/pin)
+- [ ] 添加触摸屏支持
+- [ ] 增加更多环境监测参数
+- [ ] 优化 UI 交互体验
+- [ ] 添加历史数据存储
+- [ ] 实现远程控制功能
 
-## 小实验
+## 许可证
 
-思考一下如何点亮蓝色 LED 呢？
+本项目仅供学习参考使用。
+
+## 作者
+
+仓库环境监测系统开发
+
+## 致谢
+
+- RT-Thread 社区
+- OneNET 物联网平台
+- LVGL 图形库
