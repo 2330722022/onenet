@@ -4,11 +4,41 @@
 #include <wlan_mgnt.h>
 #include "aht10.h"
 #include "ap3216c.h"
+#include "icm20608.h"
 #include <drv_lcd.h>
 #include <onenet.h>
 #include <cJSON.h>
 #include <string.h>
 #include <stdlib.h>
+#include <math.h>
+
+/* LVGL头文件 */
+#ifdef __has_include
+    #if __has_include("lvgl.h")
+        #ifndef LV_LVGL_H_INCLUDE_SIMPLE
+            #define LV_LVGL_H_INCLUDE_SIMPLE
+        #endif
+    #endif
+#endif
+
+#if defined(LV_LVGL_H_INCLUDE_SIMPLE)
+    #include "lvgl.h"
+#else
+    #include "lvgl/lvgl.h"
+#endif
+
+/* 声明中文字库 */
+LV_FONT_DECLARE(my_font_cn_16);
+
+/* 图标资源声明（变量名与文件名一致）*/
+extern const lv_img_dsc_t Environmental;   // 温度计图标
+extern const lv_img_dsc_t waterprof;       // 水滴图标
+extern const lv_img_dsc_t light;           // 光照图标
+extern const lv_img_dsc_t Alarm;           // 红色警报图标
+extern const lv_img_dsc_t tilt;            // 货架倾斜图标
+extern const lv_img_dsc_t connected;       // WiFi状态图标
+extern const lv_img_dsc_t onenet_upload;   // OneNET上传图标
+extern const lv_img_dsc_t Megaphone;       // 蜂鸣器图标
 
 /* ==================== 用户配置区 ==================== */
 #define STUDENT_ID      "23001040215"
@@ -52,21 +82,18 @@ int servo_init(void)
 
 int servo_set_angle(int angle)
 {
-    if (servo_pwm_dev == RT_NULL)
-    {
-        rt_kprintf("Servo: not initialized!\n");
-        return -1;
-    }
+    static int last_angle = -1;
     
-    if (angle < SERVO_ANGLE_MIN || angle > SERVO_ANGLE_MAX)
-    {
-        rt_kprintf("Servo: angle %d out of range [%d, %d]!\n", angle, SERVO_ANGLE_MIN, SERVO_ANGLE_MAX);
-        return -1;
-    }
+    if (servo_pwm_dev == RT_NULL) return -1;
     
+    if (angle < SERVO_ANGLE_MIN || angle > SERVO_ANGLE_MAX) return -1;
+
+    if (angle == last_angle) return 0;
+ 
     uint32_t pulse_ns = SERVO_MIN_PULSE_NS + (uint32_t)((uint32_t)angle * (SERVO_MAX_PULSE_NS - SERVO_MIN_PULSE_NS) / SERVO_ANGLE_MAX);
     
     rt_pwm_set(servo_pwm_dev, SERVO_PWM_CHANNEL, SERVO_PERIOD_NS, pulse_ns);
+    last_angle = angle;
     
     return 0;
 }
@@ -83,12 +110,19 @@ static void servo(int argc, char **argv)
 }
 MSH_CMD_EXPORT(servo, set servo angle 0-180);
 
+/* ==================== ICM20608倾斜监测配置 ==================== */
+#define TILT_THRESHOLD     15      // 倾斜阈值（度）
+#define TILT_SENSITIVITY   2       // 灵敏度（连续多少次超过阈值才触发报警）
+
 /* ==================== 传感器数据结构 ==================== */
 struct sensor_data {
     float temperature;
     float humidity;
     float light;
     uint16_t proximity;
+    float tilt_angle_x;            // X轴倾斜角度
+    float tilt_angle_y;            // Y轴倾斜角度
+    int tilt_alarm;                // 倾斜报警状态：0=正常，1=报警
 };
 
 /* 全局变量：共享数据区及其互斥量 */
@@ -98,22 +132,127 @@ static rt_mutex_t data_mutex = RT_NULL;
 /* 传感器设备句柄 */
 static aht10_device_t aht20_dev = RT_NULL;
 static ap3216c_device_t ap3216c_dev = RT_NULL;
+static icm20608_device_t icm20608_dev = RT_NULL;
 
 /* 按键信号量 */
 static rt_sem_t key_sem = RT_NULL;
+
+/* ==================== 倾斜角度计算函数 ==================== */
+static void calculate_tilt_angle(rt_int16_t accel_x, rt_int16_t accel_y, rt_int16_t accel_z, 
+                                  float *angle_x, float *angle_y)
+{
+    /* 计算重力加速度大小 */
+    float g = sqrt(accel_x * accel_x + accel_y * accel_y + accel_z * accel_z);
+    
+    if (g < 100)  // 防止除零
+    {
+        *angle_x = 0;
+        *angle_y = 0;
+        return;
+    }
+    
+    /* 计算X轴倾斜角度：绕X轴旋转时，Y轴加速度变化 */
+    *angle_x = atan2((float)accel_y, (float)accel_z) * 180 / 3.14159f;
+    
+    /* 计算Y轴倾斜角度：绕Y轴旋转时，X轴加速度变化 */
+    *angle_y = atan2((float)accel_x, (float)accel_z) * 180 / 3.14159f;
+}
+
+/* ==================== ICM20608测试命令 ==================== */
+static void icm20608_test(int argc, char **argv)
+{
+    rt_int16_t accel_x, accel_y, accel_z;
+    rt_int16_t gyro_x, gyro_y, gyro_z;
+    float angle_x, angle_y;
+    
+    if (icm20608_dev == RT_NULL)
+    {
+        rt_kprintf("ICM20608 not initialized!\n");
+        return;
+    }
+    
+    /* 读取加速度计数据 */
+    if (icm20608_get_accel(icm20608_dev, &accel_x, &accel_y, &accel_z) == RT_EOK)
+    {
+        calculate_tilt_angle(accel_x, accel_y, accel_z, &angle_x, &angle_y);
+        rt_kprintf("ICM20608 Accel: X=%d, Y=%d, Z=%d\n", accel_x, accel_y, accel_z);
+        rt_kprintf("Tilt Angle: X=%d.%d deg, Y=%d.%d deg\n", 
+                   (int)angle_x, abs((int)(angle_x * 10) % 10),
+                   (int)angle_y, abs((int)(angle_y * 10) % 10));
+    }
+    else
+    {
+        rt_kprintf("Failed to read accelerometer!\n");
+    }
+    
+    /* 读取陀螺仪数据 */
+    if (icm20608_get_gyro(icm20608_dev, &gyro_x, &gyro_y, &gyro_z) == RT_EOK)
+    {
+        rt_kprintf("ICM20608 Gyro: X=%d, Y=%d, Z=%d\n", gyro_x, gyro_y, gyro_z);
+    }
+    else
+    {
+        rt_kprintf("Failed to read gyroscope!\n");
+    }
+}
+MSH_CMD_EXPORT(icm20608_test, test ICM20608 sensor);
 
 /* ==================== 传感器采集线程 ==================== */
 static void sensor_thread_entry(void *parameter)
 {
     struct sensor_data data;
+    rt_int16_t accel_x, accel_y, accel_z;
+    static int tilt_warning_count = 0;
+    
     while (1)
     {
-        /* 读取传感器（两个不同 I2C，无需互斥） */
+        /* 读取环境传感器 */
         data.temperature = aht10_read_temperature(aht20_dev);
         data.humidity    = aht10_read_humidity(aht20_dev);
         data.light       = ap3216c_read_ambient_light(ap3216c_dev);
         data.proximity   = ap3216c_read_ps_data(ap3216c_dev);
-
+        
+        /* 读取ICM20608加速度计数据 */
+        if (icm20608_dev != RT_NULL)
+        {
+            if (icm20608_get_accel(icm20608_dev, &accel_x, &accel_y, &accel_z) == RT_EOK)
+            {
+                /* 计算倾斜角度 */
+                calculate_tilt_angle(accel_x, accel_y, accel_z, 
+                                     &data.tilt_angle_x, &data.tilt_angle_y);
+                
+                /* 检测倾斜是否超过阈值 */
+                if (abs(data.tilt_angle_x) > TILT_THRESHOLD || 
+                    abs(data.tilt_angle_y) > TILT_THRESHOLD)
+                {
+                    tilt_warning_count++;
+                    if (tilt_warning_count >= TILT_SENSITIVITY)
+                    {
+                        data.tilt_alarm = 1;
+                        rt_kprintf("ALERT: Shelf tilted! X:%d.%d Y:%d.%d\n", 
+                                   (int)data.tilt_angle_x, abs((int)(data.tilt_angle_x * 10) % 10),
+                                   (int)data.tilt_angle_y, abs((int)(data.tilt_angle_y * 10) % 10));
+                    }
+                }
+                else
+                {
+                    tilt_warning_count = 0;
+                    data.tilt_alarm = 0;
+                }
+                
+                rt_kprintf("ICM20608: X:%d.%d Y:%d.%d Alarm=%d\n", 
+                           (int)data.tilt_angle_x, abs((int)(data.tilt_angle_x * 10) % 10),
+                           (int)data.tilt_angle_y, abs((int)(data.tilt_angle_y * 10) % 10),
+                           data.tilt_alarm);
+            }
+            else
+            {
+                data.tilt_angle_x = 0;
+                data.tilt_angle_y = 0;
+                data.tilt_alarm = 0;
+            }
+        }
+        
         /* 更新共享数据区（加锁） */
         rt_mutex_take(data_mutex, RT_WAITING_FOREVER);
         shared_data = data;
@@ -123,25 +262,116 @@ static void sensor_thread_entry(void *parameter)
     }
 }
 
-/* ==================== LCD显示线程 ==================== */
+/* ==================== LVGL UI 全局变量 ==================== */
+static lv_obj_t *img_main_status; // 动态切换的警报图标
+static lv_obj_t *label_temp_val;  // 温度数值标签
+static lv_obj_t *label_humi_val;  // 湿度数值标签
+static lv_obj_t *label_light_val; // 光照数值标签
+static lv_obj_t *label_tilt_x_val; // X轴倾斜角度标签
+static lv_obj_t *label_tilt_y_val; // Y轴倾斜角度标签
+static lv_obj_t *label_alarm_status; // 报警状态标签
+static lv_obj_t *img_beep_status;   // 蜂鸣器状态图标
+static lv_obj_t *img_wifi_status;   // WiFi状态图标
+static lv_obj_t *img_cloud_status;  // OneNET状态图标
+
+/* ==================== UI静态布局实现 ==================== */
+static void warehouse_ui_init(void) {
+    lv_obj_t *scr = lv_scr_act();
+    lv_obj_set_style_bg_color(scr, lv_color_white(), 0);
+
+    /* 1. 顶部状态栏：显示 WiFi 和 OneNET 上传图标 */
+    img_wifi_status = lv_img_create(scr);
+    lv_img_set_src(img_wifi_status, &connected);
+    lv_obj_align(img_wifi_status, LV_ALIGN_TOP_RIGHT, -5, 5);
+
+    img_cloud_status = lv_img_create(scr);
+    lv_img_set_src(img_cloud_status, &onenet_upload);
+    lv_obj_align_to(img_cloud_status, img_wifi_status, LV_ALIGN_OUT_LEFT_MID, -5, 0);
+
+    /* 2. 中文标题：使用 my_font_cn_16 字库 */
+    lv_obj_t *title = lv_label_create(scr);
+    lv_obj_set_style_text_font(title, &my_font_cn_16, 0);
+    lv_obj_set_style_text_color(title, lv_color_black(), 0);
+    lv_label_set_text(title, "仓库环境监测");
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 10, 10);
+
+    /* 3. 数据展示区：温度 */
+    lv_obj_t *img_temp = lv_img_create(scr);
+    lv_img_set_src(img_temp, &Environmental);
+    lv_obj_align(img_temp, LV_ALIGN_LEFT_MID, 15, -60);
+
+    label_temp_val = lv_label_create(scr);
+    lv_obj_set_style_text_font(label_temp_val, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(label_temp_val, lv_color_black(), 0);
+    lv_label_set_text(label_temp_val, "--.-- C");
+    lv_obj_align_to(label_temp_val, img_temp, LV_ALIGN_OUT_RIGHT_MID, 10, 0);
+
+    /* 4. 数据展示区：湿度 */
+    lv_obj_t *img_humi = lv_img_create(scr);
+    lv_img_set_src(img_humi, &waterprof);
+    lv_obj_align(img_humi, LV_ALIGN_RIGHT_MID, -15, -60);
+
+    label_humi_val = lv_label_create(scr);
+    lv_obj_set_style_text_font(label_humi_val, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(label_humi_val, lv_color_black(), 0);
+    lv_label_set_text(label_humi_val, "--.-- %");
+    lv_obj_align_to(label_humi_val, img_humi, LV_ALIGN_OUT_LEFT_MID, -10, 0);
+
+    /* 5. 数据展示区：光照 */
+    lv_obj_t *img_light = lv_img_create(scr);
+    lv_img_set_src(img_light, &light);
+    lv_obj_align(img_light, LV_ALIGN_LEFT_MID, 15, 0);
+
+    label_light_val = lv_label_create(scr);
+    lv_obj_set_style_text_font(label_light_val, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(label_light_val, lv_color_black(), 0);
+    lv_label_set_text(label_light_val, "--- Lux");
+    lv_obj_align_to(label_light_val, img_light, LV_ALIGN_OUT_RIGHT_MID, 10, 0);
+
+    /* 6. 倾斜角度显示区 */
+    lv_obj_t *img_tilt = lv_img_create(scr);
+    lv_img_set_src(img_tilt, &tilt);
+    lv_obj_align(img_tilt, LV_ALIGN_RIGHT_MID, -15, 0);
+
+    label_tilt_x_val = lv_label_create(scr);
+    lv_obj_set_style_text_font(label_tilt_x_val, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(label_tilt_x_val, lv_color_black(), 0);
+    lv_label_set_text(label_tilt_x_val, "X: --.-");
+    lv_obj_align_to(label_tilt_x_val, img_tilt, LV_ALIGN_OUT_LEFT_MID, -5, -10);
+
+    label_tilt_y_val = lv_label_create(scr);
+    lv_obj_set_style_text_font(label_tilt_y_val, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(label_tilt_y_val, lv_color_black(), 0);
+    lv_label_set_text(label_tilt_y_val, "Y: --.-");
+    lv_obj_align_to(label_tilt_y_val, label_tilt_x_val, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 2);
+
+    /* 7. 底部状态区 */
+    label_alarm_status = lv_label_create(scr);
+    lv_obj_set_style_text_font(label_alarm_status, &my_font_cn_16, 0);
+    lv_obj_set_style_text_color(label_alarm_status, lv_color_black(), 0);
+    lv_label_set_text(label_alarm_status, "正常");
+    lv_obj_align(label_alarm_status, LV_ALIGN_BOTTOM_LEFT, 10, -10);
+
+    img_main_status = lv_img_create(scr);
+    lv_img_set_src(img_main_status, &Environmental);
+    lv_obj_align(img_main_status, LV_ALIGN_BOTTOM_MID, 0, -10);
+
+    img_beep_status = lv_img_create(scr);
+    lv_img_set_src(img_beep_status, &Megaphone);
+    lv_obj_add_flag(img_beep_status, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(img_beep_status, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+}
+
+/* ==================== LCD显示线程（LVGL版本） ==================== */
 static void display_thread_entry(void *parameter)
 {
     struct sensor_data data;
-    int light_int, temp_int, humi_int, temp_frac, humi_frac;
     char buf[32];
+    static int beep_on = 0;
+    static int blink_count = 0;
 
-    lcd_clear(WHITE);
-    lcd_set_color(WHITE, BLACK);
-
-    /* 固定标题：学号 */
-    lcd_show_string(20, 5, 16, "ID: ");
-    lcd_show_string(60, 5, 16, STUDENT_ID);
-
-    /* 绘制四分格边框（只绘制一次，后面只刷新内容） */
-    lcd_draw_rectangle(0, 30, 120, 150);
-    lcd_draw_rectangle(120, 30, 240, 150);
-    lcd_draw_rectangle(0, 150, 120, 240);
-    lcd_draw_rectangle(120, 150, 240, 240);
+    /* 初始化LVGL界面 */
+    warehouse_ui_init();
 
     while (1)
     {
@@ -150,40 +380,67 @@ static void display_thread_entry(void *parameter)
         data = shared_data;
         rt_mutex_release(data_mutex);
 
-        /* 刷新 LCD 各格子内容 */
-        /* 左上：光照 */
-        light_int = (int)data.light;
-        rt_sprintf(buf, "Lux:%d", light_int);
-        lcd_fill(1, 31, 119, 149, WHITE);
-        lcd_show_string(10, 50, 16, "Light");
-        lcd_show_string(10, 80, 16, buf);
+        /* 更新温度显示 */
+        rt_sprintf(buf, "%d.%d C", (int)data.temperature, 
+                   abs((int)((data.temperature - (int)data.temperature) * 10)));
+        lv_label_set_text(label_temp_val, buf);
 
-        /* 右上：接近 */
-        rt_sprintf(buf, "PS:%d", data.proximity);
-        lcd_fill(121, 31, 239, 149, WHITE);
-        lcd_show_string(130, 50, 16, "Proximity");
-        lcd_show_string(130, 80, 16, buf);
+        /* 更新湿度显示 */
+        rt_sprintf(buf, "%d.%d %%", (int)data.humidity, 
+                   abs((int)((data.humidity - (int)data.humidity) * 10)));
+        lv_label_set_text(label_humi_val, buf);
 
-        /* 左下：温度 */
-        temp_int = (int)data.temperature;
-        temp_frac = (int)((data.temperature - temp_int) * 10);
-        if (temp_frac < 0) temp_frac = -temp_frac;
-        rt_sprintf(buf, "%d.%d C", temp_int, temp_frac);
-        lcd_fill(1, 151, 119, 239, WHITE);
-        lcd_show_string(10, 170, 16, "Temp");
-        lcd_show_string(10, 200, 16, buf);
+        /* 更新光照显示 */
+        rt_sprintf(buf, "%d Lux", (int)data.light);
+        lv_label_set_text(label_light_val, buf);
 
-        /* 右下：湿度 */
-        humi_int = (int)data.humidity;
-        humi_frac = (int)((data.humidity - humi_int) * 10);
-        if (humi_frac < 0) humi_frac = -humi_frac;
-        rt_sprintf(buf, "%d.%d %%", humi_int, humi_frac);
-        lcd_fill(121, 151, 239, 239, WHITE);
-        lcd_show_string(130, 170, 16, "Humi");
-        lcd_show_string(130, 200, 16, buf);
+        /* 更新倾斜角度显示 */
+        rt_sprintf(buf, "X:%d.%d", (int)data.tilt_angle_x, 
+                   abs((int)((data.tilt_angle_x - (int)data.tilt_angle_x) * 10)));
+        lv_label_set_text(label_tilt_x_val, buf);
+        rt_sprintf(buf, "Y:%d.%d", (int)data.tilt_angle_y, 
+                   abs((int)((data.tilt_angle_y - (int)data.tilt_angle_y) * 10)));
+        lv_label_set_text(label_tilt_y_val, buf);
 
-        /* 刷新间隔 1 秒（与采集周期 2 秒错开，保证数据不重复） */
-        rt_thread_mdelay(1000);
+        /* 更新WiFi状态图标 */
+        if (wifi_connected) {
+            lv_img_set_src(img_wifi_status, &connected);
+        }
+
+        /* 更新蜂鸣器状态图标闪烁 */
+        beep_on = (rt_pin_read(BEEP_PIN) == PIN_HIGH) ? 1 : 0;
+        blink_count++;
+        if (beep_on && (blink_count % 10) < 5) {
+            lv_obj_clear_flag(img_beep_status, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(img_beep_status, LV_OBJ_FLAG_HIDDEN);
+        }
+
+        /* 闭环逻辑：基于温湿度或 ICM20608 姿态数据的 UI 反馈 */
+        if (data.temperature > 35.0f) {
+            /* 温度过高，显示警报图标并文字变红 */
+            lv_img_set_src(img_main_status, &Alarm);
+            lv_obj_set_style_text_color(label_temp_val, lv_palette_main(LV_PALETTE_RED), 0);
+            lv_label_set_text(label_alarm_status, "温度过高");
+            lv_obj_set_style_text_color(label_alarm_status, lv_palette_main(LV_PALETTE_RED), 0);
+        } else if (data.tilt_alarm) {
+            /* 检测到货架失稳，显示倾斜图标 */
+            lv_img_set_src(img_main_status, &tilt);
+            lv_obj_set_style_text_color(label_temp_val, lv_color_black(), 0);
+            lv_label_set_text(label_alarm_status, "货架倾斜");
+            lv_obj_set_style_text_color(label_alarm_status, lv_palette_main(LV_PALETTE_ORANGE), 0);
+        } else {
+            /* 恢复正常 */
+            lv_img_set_src(img_main_status, &Environmental);
+            lv_obj_set_style_text_color(label_temp_val, lv_color_black(), 0);
+            lv_label_set_text(label_alarm_status, "正常");
+            lv_obj_set_style_text_color(label_alarm_status, lv_palette_main(LV_PALETTE_GREEN), 0);
+        }
+
+        /* LVGL任务处理 */
+        lv_task_handler();
+        
+        rt_thread_mdelay(500);
     }
 }
 
@@ -401,6 +658,20 @@ static void system_init(void)
     /* 3. 初始化传感器 */
     aht20_dev = aht10_init("i2c3");
     ap3216c_dev = ap3216c_init("i2c2");
+    
+    /* 初始化ICM20608加速度计 */
+    icm20608_dev = icm20608_init("i2c2");
+    if (icm20608_dev != RT_NULL)
+    {
+        /* 校准ICM20608 */
+        icm20608_calib_level(icm20608_dev, 100);
+        rt_kprintf("ICM20608 initialized and calibrated\n");
+    }
+    else
+    {
+        rt_kprintf("ICM20608 init failed!\n");
+    }
+    
     if (aht20_dev == RT_NULL || ap3216c_dev == RT_NULL)
     {
         rt_kprintf("Sensor init failed!\n");
@@ -414,6 +685,12 @@ static void system_init(void)
         rt_kprintf("IPC create failed!\n");
         return;
     }
+
+    /* 4.5. 初始化 LVGL */
+    rt_kprintf("Initializing LVGL...\n");
+    lv_init();
+    lv_port_disp_init();
+    rt_kprintf("LVGL initialized successfully!\n");
 
     /* 5. 创建采集线程和显示线程 */
     rt_thread_t tid_sensor = rt_thread_create("sensor", sensor_thread_entry, RT_NULL,
@@ -438,38 +715,28 @@ int main(void)
 
     system_init();
 
-    lcd_clear(WHITE);
-    lcd_show_string(20, 100, 24, "System Ready");
-    lcd_show_string(20, 130, 16, "Connecting WiFi...");
-
     /* 自动连接WiFi */
     rt_kprintf("Connecting to WiFi network...\n");
     ret = wifi_connect();
     if (ret != 0)
     {
         rt_kprintf("WiFi connection failed!\n");
-        lcd_show_string(20, 160, 16, "WiFi Failed");
     }
     else
     {
         rt_kprintf("WiFi connected successfully!\n");
-        lcd_show_string(20, 160, 16, "WiFi Connected");
 
         /* 初始化 OneNET */
-        lcd_fill(0, 80, 240, 240, WHITE);
-        lcd_show_string(20, 100, 24, "Init OneNET...");
         rt_kprintf("Initializing OneNET...\n");
 
         ret = onenet_mqtt_init();
         if (ret != 0)
         {
             rt_kprintf("OneNET init failed: %d\n", ret);
-            lcd_show_string(20, 130, 16, "OneNET Init Failed");
         }
         else
         {
             rt_kprintf("OneNET init success\n");
-            lcd_show_string(20, 130, 16, "OneNET Connected");
 
             /* 注册下行控制回调函数 */
             onenet_set_cmd_rsp_cb(onenet_cmd_rsp_cb);
@@ -496,3 +763,5 @@ int main(void)
     }
     return 0;
 }
+
+

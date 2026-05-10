@@ -297,6 +297,12 @@
 
 /* LVGL: powerful and easy-to-use embedded GUI library */
 
+#define PKG_USING_LVGL
+#define PKG_LVGL_THREAD_PRIO 20
+#define PKG_LVGL_THREAD_STACK_SIZE 4096
+#define PKG_LVGL_DISP_REFR_PERIOD 5
+#define PKG_LVGL_USING_V080311
+#define PKG_LVGL_VER_NUM 0x080311
 /* end of LVGL: powerful and easy-to-use embedded GUI library */
 
 /* u8g2: a monochrome graphic library */
@@ -346,6 +352,8 @@
 #define PKG_USING_AHT10_V210
 #define PKG_USING_AP3216C
 #define PKG_USING_AP3216C_V200
+#define PKG_USING_ICM20608
+#define PKG_USING_ICM20608_LATEST_VERSION
 /* end of sensors drivers */
 
 /* touch drivers */
@@ -435,6 +443,8 @@
 #define BSP_USING_ONBOARD_LCD
 #define BSP_USING_ONBOARD_LCD_PWM_BL
 #define BSP_USING_ONBOARD_LCD_TEST
+#define BSP_USING_LVGL
+#define BSP_USING_LVGL_DEMO
 #define BSP_USING_RW007_WLAN
 /* end of Onboard Peripheral Drivers */
 
