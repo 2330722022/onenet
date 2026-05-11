@@ -54,6 +54,30 @@ static int wifi_connected = 0;
 #define LED_R_PIN       GET_PIN(F, 12)      // 红色LED (低电平亮)
 #define BEEP_PIN        GET_PIN(B, 0)       // 蜂鸣器 (高电平响)
 #define KEY_WK_UP       GET_PIN(C, 5)       // WK_UP按键
+#define LCD_BL_PIN      GET_PIN(A, 8)       // LCD背光控制引脚
+
+/* ==================== 屏幕管理器（息屏与唤醒） ==================== */
+#define SCREEN_AUTO_OFF_TIME 30000  // 30秒自动熄屏
+
+typedef struct {
+    rt_bool_t is_on;            // 屏幕亮灭状态
+    rt_tick_t timeout_tick;     // 熄屏目标时刻
+    rt_mutex_t lock;            // 保护状态变量的互斥量
+} screen_mgr_t;
+
+static screen_mgr_t screen_mgr;
+
+/* 唤醒屏幕的公共接口（可在任何线程调用） */
+static void screen_wakeup(void) {
+    rt_mutex_take(screen_mgr.lock, RT_WAITING_FOREVER);
+    screen_mgr.timeout_tick = rt_tick_get() + rt_tick_from_millisecond(SCREEN_AUTO_OFF_TIME);
+    if (!screen_mgr.is_on) {
+        rt_pin_write(LCD_BL_PIN, PIN_HIGH);  // 点亮背光
+        screen_mgr.is_on = RT_TRUE;
+        rt_kprintf("[LCD] Screen Awakened\n");
+    }
+    rt_mutex_release(screen_mgr.lock);
+}
 
 /* ==================== 舵机驱动 ==================== */
 #define SERVO_PWM_DEV      "pwm3"
@@ -236,6 +260,7 @@ static void sensor_thread_entry(void *parameter)
                     if (tilt_warning_count >= TILT_SENSITIVITY)
                     {
                         data.tilt_alarm = 1;
+                        screen_wakeup();  // 检测到异常，自动亮屏显示报警图标
                         rt_kprintf("ALERT: Shelf tilted! X:%d.%d Y:%d.%d\n", 
                                    (int)data.tilt_angle_x, abs((int)(data.tilt_angle_x * 10) % 10),
                                    (int)data.tilt_angle_y, abs((int)(data.tilt_angle_y * 10) % 10));
@@ -261,12 +286,9 @@ static void sensor_thread_entry(void *parameter)
         }
         
         /* 更新共享数据区（加锁） */
-        rt_kprintf("[sensor] Taking data_mutex...\n");
         rt_mutex_take(data_mutex, RT_WAITING_FOREVER);
-        rt_kprintf("[sensor] Got data_mutex, updating shared_data...\n");
         shared_data = data;
         rt_mutex_release(data_mutex);
-        rt_kprintf("[sensor] Released data_mutex\n");
 
         rt_thread_mdelay(2000);
     }
@@ -372,10 +394,10 @@ static void warehouse_ui_init(void) {
     lv_obj_align(img_beep_status, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
 }
 
-/* ==================== LCD显示线程（LVGL版本） ==================== */
+/* ==================== LCD显示线程（LVGL版本 - 事件驱动 + 超时机制） ==================== */
 static void display_thread_entry(void *parameter)
 {
-    struct sensor_data data;
+    struct sensor_data local_data;
     char buf[32];
     static int beep_on = 0;
     static int blink_count = 0;
@@ -384,44 +406,27 @@ static void display_thread_entry(void *parameter)
     /* 初始化LVGL界面 */
     warehouse_ui_init();
 
+    /* 初始化屏幕状态 */
+    rt_mutex_take(screen_mgr.lock, RT_WAITING_FOREVER);
+    screen_mgr.is_on = RT_TRUE;
+    screen_mgr.timeout_tick = rt_tick_get() + rt_tick_from_millisecond(SCREEN_AUTO_OFF_TIME);
+    rt_mutex_release(screen_mgr.lock);
+
     while (1)
     {
-        /* 读取共享数据（加锁） */
-        rt_kprintf("[display] Taking data_mutex...\n");
-        rt_mutex_take(data_mutex, RT_WAITING_FOREVER);
-        rt_kprintf("[display] Got data_mutex, reading shared_data...\n");
-        data = shared_data;
-        rt_mutex_release(data_mutex);
-        rt_kprintf("[display] Released data_mutex\n");
+        /* 1. 处理 LVGL 内部定时任务（必须高频执行，确保响应） */
+        lv_timer_handler();
 
-        /* 更新温度显示 */
-        rt_sprintf(buf, "%d.%d C", (int)data.temperature, 
-                   abs((int)((data.temperature - (int)data.temperature) * 10)));
-        lv_label_set_text(label_temp_val, buf);
-
-        /* 更新湿度显示 */
-        rt_sprintf(buf, "%d.%d %%", (int)data.humidity, 
-                   abs((int)((data.humidity - (int)data.humidity) * 10)));
-        lv_label_set_text(label_humi_val, buf);
-
-        /* 更新光照显示 */
-        rt_sprintf(buf, "%d Lux", (int)data.light);
-        lv_label_set_text(label_light_val, buf);
-
-        /* 更新倾斜角度显示 */
-        rt_sprintf(buf, "X:%d.%d", (int)data.tilt_angle_x, 
-                   abs((int)((data.tilt_angle_x - (int)data.tilt_angle_x) * 10)));
-        lv_label_set_text(label_tilt_x_val, buf);
-        rt_sprintf(buf, "Y:%d.%d", (int)data.tilt_angle_y, 
-                   abs((int)((data.tilt_angle_y - (int)data.tilt_angle_y) * 10)));
-        lv_label_set_text(label_tilt_y_val, buf);
-
-        /* 更新WiFi状态图标 */
-        if (wifi_connected) {
-            lv_img_set_src(img_wifi_status, &connected);
+        /* 2. 检查熄屏逻辑 */
+        if (screen_mgr.is_on) {
+            if (rt_tick_get() > screen_mgr.timeout_tick) {
+                rt_pin_write(LCD_BL_PIN, PIN_LOW);  // 关闭背光
+                screen_mgr.is_on = RT_FALSE;
+                rt_kprintf("[LCD] Screen Sleeping...\n");
+            }
         }
 
-        /* 处理蜂鸣器控制（事件驱动） */
+        /* 3. 处理蜂鸣器控制（事件驱动） */
         if (rt_event_recv(&system_event, EVENT_BEEP_TOGGLE, RT_EVENT_FLAG_OR | RT_EVENT_FLAG_CLEAR, 
                           0, &recved) == RT_EOK) {
             beep_control_flag = !beep_control_flag;
@@ -429,46 +434,77 @@ static void display_thread_entry(void *parameter)
             rt_kprintf("[display] BEEP toggled: %s\n", beep_control_flag ? "ON" : "OFF");
         }
 
-        /* 更新蜂鸣器状态图标闪烁 */
-        beep_on = beep_control_flag;
-        blink_count++;
-        if (beep_on && (blink_count % 10) < 5) {
-            lv_obj_clear_flag(img_beep_status, LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_add_flag(img_beep_status, LV_OBJ_FLAG_HIDDEN);
+        /* 4. 数据更新逻辑（仅在屏幕亮着时处理，减轻 CPU 负担） */
+        if (screen_mgr.is_on) {
+            /* 关键：获取数据互斥量，拷贝完立即释放，严禁在持锁时调用 LVGL 函数 */
+            if (rt_mutex_take(data_mutex, rt_tick_from_millisecond(10)) == RT_EOK) {
+                local_data = shared_data;
+                rt_mutex_release(data_mutex);
+
+                /* 更新温度显示 */
+                rt_sprintf(buf, "%d.%d C", (int)local_data.temperature, 
+                           abs((int)((local_data.temperature - (int)local_data.temperature) * 10)));
+                lv_label_set_text(label_temp_val, buf);
+
+                /* 更新湿度显示 */
+                rt_sprintf(buf, "%d.%d %%", (int)local_data.humidity, 
+                           abs((int)((local_data.humidity - (int)local_data.humidity) * 10)));
+                lv_label_set_text(label_humi_val, buf);
+
+                /* 更新光照显示 */
+                rt_sprintf(buf, "%d Lux", (int)local_data.light);
+                lv_label_set_text(label_light_val, buf);
+
+                /* 更新倾斜角度显示 */
+                rt_sprintf(buf, "X:%d.%d", (int)local_data.tilt_angle_x, 
+                           abs((int)((local_data.tilt_angle_x - (int)local_data.tilt_angle_x) * 10)));
+                lv_label_set_text(label_tilt_x_val, buf);
+                rt_sprintf(buf, "Y:%d.%d", (int)local_data.tilt_angle_y, 
+                           abs((int)((local_data.tilt_angle_y - (int)local_data.tilt_angle_y) * 10)));
+                lv_label_set_text(label_tilt_y_val, buf);
+
+                /* 更新WiFi状态图标 */
+                if (wifi_connected) {
+                    lv_img_set_src(img_wifi_status, &connected);
+                }
+
+                /* 更新蜂鸣器状态图标闪烁 */
+                beep_on = beep_control_flag;
+                blink_count++;
+                if (beep_on && (blink_count % 10) < 5) {
+                    lv_obj_clear_flag(img_beep_status, LV_OBJ_FLAG_HIDDEN);
+                } else {
+                    lv_obj_add_flag(img_beep_status, LV_OBJ_FLAG_HIDDEN);
+                }
+
+                /* 闭环逻辑：基于温湿度或 ICM20608 姿态数据的 UI 反馈 */
+                if (local_data.temperature > 35.0f) {
+                    lv_img_set_src(img_main_status, &Alarm);
+                    lv_obj_set_style_text_color(label_temp_val, lv_palette_main(LV_PALETTE_RED), 0);
+                    lv_label_set_text(label_alarm_status, "温度过高");
+                    lv_obj_set_style_text_color(label_alarm_status, lv_palette_main(LV_PALETTE_RED), 0);
+                } else if (local_data.tilt_alarm) {
+                    lv_img_set_src(img_main_status, &tilt);
+                    lv_obj_set_style_text_color(label_temp_val, lv_color_black(), 0);
+                    lv_label_set_text(label_alarm_status, "货架倾斜");
+                    lv_obj_set_style_text_color(label_alarm_status, lv_palette_main(LV_PALETTE_ORANGE), 0);
+                } else {
+                    lv_img_set_src(img_main_status, &Environmental);
+                    lv_obj_set_style_text_color(label_temp_val, lv_color_black(), 0);
+                    lv_label_set_text(label_alarm_status, "正常");
+                    lv_obj_set_style_text_color(label_alarm_status, lv_palette_main(LV_PALETTE_GREEN), 0);
+                }
+            }
         }
 
-        /* 闭环逻辑：基于温湿度或 ICM20608 姿态数据的 UI 反馈 */
-        if (data.temperature > 35.0f) {
-            /* 温度过高，显示警报图标并文字变红 */
-            lv_img_set_src(img_main_status, &Alarm);
-            lv_obj_set_style_text_color(label_temp_val, lv_palette_main(LV_PALETTE_RED), 0);
-            lv_label_set_text(label_alarm_status, "温度过高");
-            lv_obj_set_style_text_color(label_alarm_status, lv_palette_main(LV_PALETTE_RED), 0);
-        } else if (data.tilt_alarm) {
-            /* 检测到货架失稳，显示倾斜图标 */
-            lv_img_set_src(img_main_status, &tilt);
-            lv_obj_set_style_text_color(label_temp_val, lv_color_black(), 0);
-            lv_label_set_text(label_alarm_status, "货架倾斜");
-            lv_obj_set_style_text_color(label_alarm_status, lv_palette_main(LV_PALETTE_ORANGE), 0);
-        } else {
-            /* 恢复正常 */
-            lv_img_set_src(img_main_status, &Environmental);
-            lv_obj_set_style_text_color(label_temp_val, lv_color_black(), 0);
-            lv_label_set_text(label_alarm_status, "正常");
-            lv_obj_set_style_text_color(label_alarm_status, lv_palette_main(LV_PALETTE_GREEN), 0);
-        }
-
-        /* LVGL任务处理 */
-        lv_task_handler();
-        
-        rt_thread_mdelay(200);  // UI降频到200ms刷新
+        rt_thread_mdelay(20);  // 给其他线程（按键、传感器）留出呼吸空间
     }
 }
 
 /* ==================== 按键处理 ==================== */
 static void key_irq_callback(void *args)
 {
+    screen_wakeup();  // 按键唤醒屏幕
     rt_event_send(&system_event, EVENT_BEEP_TOGGLE);  // 按键回调只发信号
 }
 
@@ -640,11 +676,18 @@ static void system_init(void)
     /* 1.5. 创建系统事件对象 */
     rt_event_init(&system_event, "sys_event", RT_IPC_FLAG_FIFO);
 
+    /* 1.6. 初始化屏幕管理器 */
+    rt_mutex_init(&screen_mgr.lock, "screen_lock", RT_IPC_FLAG_FIFO);
+    screen_mgr.is_on = RT_FALSE;
+    screen_mgr.timeout_tick = 0;
+
     /* 2. 初始化 LED、蜂鸣器引脚 */
     rt_pin_mode(LED_R_PIN, PIN_MODE_OUTPUT);
     rt_pin_mode(BEEP_PIN, PIN_MODE_OUTPUT);
+    rt_pin_mode(LCD_BL_PIN, PIN_MODE_OUTPUT);  // 初始化背光引脚
     rt_pin_write(LED_R_PIN, PIN_HIGH);
     rt_pin_write(BEEP_PIN, PIN_LOW);
+    rt_pin_write(LCD_BL_PIN, PIN_HIGH);  // 默认点亮背光
 
     /* 3. 初始化舵机 */
     if (servo_init() != 0)
