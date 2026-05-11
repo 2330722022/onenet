@@ -397,12 +397,17 @@ static void warehouse_ui_init(void) {
 /* ==================== LCD显示线程（LVGL版本 - 事件驱动 + 超时机制） ==================== */
 static void display_thread_entry(void *parameter)
 {
-    struct sensor_data local_data;
-    char buf[32];
+    struct sensor_data local_data = {0};  // 初始化本地数据
+    char buf[64];  // 增大缓冲区防止溢出
     static int beep_on = 0;
     static int blink_count = 0;
     rt_uint32_t recved;
+    int temp_int, temp_dec, humi_int, humi_dec;
+    int tilt_x_int, tilt_x_dec, tilt_y_int, tilt_y_dec;
 
+    /* 等待UI初始化完成 */
+    rt_thread_mdelay(100);
+    
     /* 初始化LVGL界面 */
     warehouse_ui_init();
 
@@ -417,7 +422,8 @@ static void display_thread_entry(void *parameter)
         /* 1. 处理 LVGL 内部定时任务（必须高频执行，确保响应） */
         lv_timer_handler();
 
-        /* 2. 检查熄屏逻辑 */
+        /* 2. 检查熄屏逻辑（加互斥锁保护） */
+        rt_mutex_take(screen_mgr.lock, RT_WAITING_FOREVER);
         if (screen_mgr.is_on) {
             if (rt_tick_get() > screen_mgr.timeout_tick) {
                 rt_pin_write(LCD_BL_PIN, PIN_LOW);  // 关闭背光
@@ -425,6 +431,7 @@ static void display_thread_entry(void *parameter)
                 rt_kprintf("[LCD] Screen Sleeping...\n");
             }
         }
+        rt_mutex_release(screen_mgr.lock);
 
         /* 3. 处理蜂鸣器控制（事件驱动） */
         if (rt_event_recv(&system_event, EVENT_BEEP_TOGGLE, RT_EVENT_FLAG_OR | RT_EVENT_FLAG_CLEAR, 
@@ -435,66 +442,91 @@ static void display_thread_entry(void *parameter)
         }
 
         /* 4. 数据更新逻辑（仅在屏幕亮着时处理，减轻 CPU 负担） */
+        rt_mutex_take(screen_mgr.lock, RT_WAITING_FOREVER);
         if (screen_mgr.is_on) {
+            rt_mutex_release(screen_mgr.lock);
+            
             /* 关键：获取数据互斥量，拷贝完立即释放，严禁在持锁时调用 LVGL 函数 */
             if (rt_mutex_take(data_mutex, rt_tick_from_millisecond(10)) == RT_EOK) {
                 local_data = shared_data;
                 rt_mutex_release(data_mutex);
 
-                /* 更新温度显示 */
-                rt_sprintf(buf, "%d.%d C", (int)local_data.temperature, 
-                           abs((int)((local_data.temperature - (int)local_data.temperature) * 10)));
-                lv_label_set_text(label_temp_val, buf);
+                /* 安全的浮点数转换 */
+                temp_int = (int)local_data.temperature;
+                temp_dec = abs((int)((local_data.temperature - temp_int) * 10));
+                humi_int = (int)local_data.humidity;
+                humi_dec = abs((int)((local_data.humidity - humi_int) * 10));
+                tilt_x_int = (int)local_data.tilt_angle_x;
+                tilt_x_dec = abs((int)((local_data.tilt_angle_x - tilt_x_int) * 10));
+                tilt_y_int = (int)local_data.tilt_angle_y;
+                tilt_y_dec = abs((int)((local_data.tilt_angle_y - tilt_y_int) * 10));
 
-                /* 更新湿度显示 */
-                rt_sprintf(buf, "%d.%d %%", (int)local_data.humidity, 
-                           abs((int)((local_data.humidity - (int)local_data.humidity) * 10)));
-                lv_label_set_text(label_humi_val, buf);
+                /* 更新温度显示（安全检查） */
+                rt_snprintf(buf, sizeof(buf), "%d.%d C", temp_int, temp_dec);
+                if (label_temp_val) {
+                    lv_label_set_text(label_temp_val, buf);
+                }
 
-                /* 更新光照显示 */
-                rt_sprintf(buf, "%d Lux", (int)local_data.light);
-                lv_label_set_text(label_light_val, buf);
+                /* 更新湿度显示（安全检查） */
+                rt_snprintf(buf, sizeof(buf), "%d.%d %%", humi_int, humi_dec);
+                if (label_humi_val) {
+                    lv_label_set_text(label_humi_val, buf);
+                }
 
-                /* 更新倾斜角度显示 */
-                rt_sprintf(buf, "X:%d.%d", (int)local_data.tilt_angle_x, 
-                           abs((int)((local_data.tilt_angle_x - (int)local_data.tilt_angle_x) * 10)));
-                lv_label_set_text(label_tilt_x_val, buf);
-                rt_sprintf(buf, "Y:%d.%d", (int)local_data.tilt_angle_y, 
-                           abs((int)((local_data.tilt_angle_y - (int)local_data.tilt_angle_y) * 10)));
-                lv_label_set_text(label_tilt_y_val, buf);
+                /* 更新光照显示（安全检查） */
+                rt_snprintf(buf, sizeof(buf), "%d Lux", (int)local_data.light);
+                if (label_light_val) {
+                    lv_label_set_text(label_light_val, buf);
+                }
 
-                /* 更新WiFi状态图标 */
-                if (wifi_connected) {
+                /* 更新倾斜角度显示（安全检查） */
+                rt_snprintf(buf, sizeof(buf), "X:%d.%d", tilt_x_int, tilt_x_dec);
+                if (label_tilt_x_val) {
+                    lv_label_set_text(label_tilt_x_val, buf);
+                }
+                rt_snprintf(buf, sizeof(buf), "Y:%d.%d", tilt_y_int, tilt_y_dec);
+                if (label_tilt_y_val) {
+                    lv_label_set_text(label_tilt_y_val, buf);
+                }
+
+                /* 更新WiFi状态图标（安全检查） */
+                if (wifi_connected && img_wifi_status) {
                     lv_img_set_src(img_wifi_status, &connected);
                 }
 
-                /* 更新蜂鸣器状态图标闪烁 */
+                /* 更新蜂鸣器状态图标闪烁（安全检查） */
                 beep_on = beep_control_flag;
                 blink_count++;
-                if (beep_on && (blink_count % 10) < 5) {
-                    lv_obj_clear_flag(img_beep_status, LV_OBJ_FLAG_HIDDEN);
-                } else {
-                    lv_obj_add_flag(img_beep_status, LV_OBJ_FLAG_HIDDEN);
+                if (img_beep_status) {
+                    if (beep_on && (blink_count % 10) < 5) {
+                        lv_obj_clear_flag(img_beep_status, LV_OBJ_FLAG_HIDDEN);
+                    } else {
+                        lv_obj_add_flag(img_beep_status, LV_OBJ_FLAG_HIDDEN);
+                    }
                 }
 
                 /* 闭环逻辑：基于温湿度或 ICM20608 姿态数据的 UI 反馈 */
-                if (local_data.temperature > 35.0f) {
-                    lv_img_set_src(img_main_status, &Alarm);
-                    lv_obj_set_style_text_color(label_temp_val, lv_palette_main(LV_PALETTE_RED), 0);
-                    lv_label_set_text(label_alarm_status, "温度过高");
-                    lv_obj_set_style_text_color(label_alarm_status, lv_palette_main(LV_PALETTE_RED), 0);
-                } else if (local_data.tilt_alarm) {
-                    lv_img_set_src(img_main_status, &tilt);
-                    lv_obj_set_style_text_color(label_temp_val, lv_color_black(), 0);
-                    lv_label_set_text(label_alarm_status, "货架倾斜");
-                    lv_obj_set_style_text_color(label_alarm_status, lv_palette_main(LV_PALETTE_ORANGE), 0);
-                } else {
-                    lv_img_set_src(img_main_status, &Environmental);
-                    lv_obj_set_style_text_color(label_temp_val, lv_color_black(), 0);
-                    lv_label_set_text(label_alarm_status, "正常");
-                    lv_obj_set_style_text_color(label_alarm_status, lv_palette_main(LV_PALETTE_GREEN), 0);
+                if (label_alarm_status && img_main_status && label_temp_val) {
+                    if (local_data.temperature > 35.0f) {
+                        lv_img_set_src(img_main_status, &Alarm);
+                        lv_obj_set_style_text_color(label_temp_val, lv_palette_main(LV_PALETTE_RED), 0);
+                        lv_label_set_text(label_alarm_status, "温度过高");
+                        lv_obj_set_style_text_color(label_alarm_status, lv_palette_main(LV_PALETTE_RED), 0);
+                    } else if (local_data.tilt_alarm) {
+                        lv_img_set_src(img_main_status, &tilt);
+                        lv_obj_set_style_text_color(label_temp_val, lv_color_black(), 0);
+                        lv_label_set_text(label_alarm_status, "货架倾斜");
+                        lv_obj_set_style_text_color(label_alarm_status, lv_palette_main(LV_PALETTE_ORANGE), 0);
+                    } else {
+                        lv_img_set_src(img_main_status, &Environmental);
+                        lv_obj_set_style_text_color(label_temp_val, lv_color_black(), 0);
+                        lv_label_set_text(label_alarm_status, "正常");
+                        lv_obj_set_style_text_color(label_alarm_status, lv_palette_main(LV_PALETTE_GREEN), 0);
+                    }
                 }
             }
+        } else {
+            rt_mutex_release(screen_mgr.lock);
         }
 
         rt_thread_mdelay(20);  // 给其他线程（按键、传感器）留出呼吸空间
