@@ -310,88 +310,135 @@ static lv_obj_t *img_cloud_status;  // OneNET状态图标
 static void warehouse_ui_init(void) {
     lv_obj_t *scr = lv_scr_act();
     lv_obj_set_style_bg_color(scr, lv_color_white(), 0);
+    rt_kprintf("[UI] Screen cleared to white\n");
 
     /* 1. 顶部状态栏：显示 WiFi 和 OneNET 上传图标 */
     img_wifi_status = lv_img_create(scr);
-    lv_img_set_src(img_wifi_status, &connected);
-    lv_obj_align(img_wifi_status, LV_ALIGN_TOP_RIGHT, -5, 5);
+    if (img_wifi_status) {
+        lv_img_set_src(img_wifi_status, &connected);
+        lv_obj_align(img_wifi_status, LV_ALIGN_TOP_RIGHT, -5, 5);
+        rt_kprintf("[UI] WiFi icon created\n");
+    }
 
     img_cloud_status = lv_img_create(scr);
-    lv_img_set_src(img_cloud_status, &onenet_upload);
-    lv_obj_align_to(img_cloud_status, img_wifi_status, LV_ALIGN_OUT_LEFT_MID, -5, 0);
+    if (img_cloud_status) {
+        lv_img_set_src(img_cloud_status, &onenet_upload);
+        lv_obj_align_to(img_cloud_status, img_wifi_status, LV_ALIGN_OUT_LEFT_MID, -5, 0);
+        rt_kprintf("[UI] OneNET icon created\n");
+    }
 
     /* 2. 中文标题：使用 my_font_cn_16 字库 */
     lv_obj_t *title = lv_label_create(scr);
-    lv_obj_set_style_text_font(title, &my_font_cn_16, 0);
-    lv_obj_set_style_text_color(title, lv_color_black(), 0);
-    lv_label_set_text(title, "仓库环境监测");
-    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 10, 10);
+    if (title) {
+        lv_obj_set_style_text_font(title, &my_font_cn_16, 0);
+        lv_obj_set_style_text_color(title, lv_color_black(), 0);
+        lv_label_set_text(title, "仓库环境监测");
+        lv_obj_align(title, LV_ALIGN_TOP_LEFT, 10, 10);
+        rt_kprintf("[UI] Title label created\n");
+    }
 
     /* 3. 数据展示区：温度（向下移动避免遮挡标题） */
     lv_obj_t *img_temp = lv_img_create(scr);
-    lv_img_set_src(img_temp, &Environmental);
-    lv_obj_align(img_temp, LV_ALIGN_TOP_LEFT, 15, 45);  // 从顶部向下45像素
+    if (img_temp) {
+        lv_img_set_src(img_temp, &Environmental);
+        lv_obj_align(img_temp, LV_ALIGN_TOP_LEFT, 15, 45);
+        rt_kprintf("[UI] Temp icon created\n");
+    }
 
     label_temp_val = lv_label_create(scr);
-    lv_obj_set_style_text_font(label_temp_val, &lv_font_montserrat_18, 0);
-    lv_obj_set_style_text_color(label_temp_val, lv_color_black(), 0);
-    lv_label_set_text(label_temp_val, "--.-- C");
-    lv_obj_align_to(label_temp_val, img_temp, LV_ALIGN_OUT_RIGHT_MID, 10, 0);
+    if (label_temp_val) {
+        lv_obj_set_style_text_font(label_temp_val, &lv_font_montserrat_18, 0);
+        lv_obj_set_style_text_color(label_temp_val, lv_color_black(), 0);
+        lv_label_set_text(label_temp_val, "--.-- C");
+        lv_obj_align_to(label_temp_val, img_temp, LV_ALIGN_OUT_RIGHT_MID, 10, 0);
+        rt_kprintf("[UI] Temp label created\n");
+    }
 
     /* 4. 数据展示区：湿度 */
     lv_obj_t *img_humi = lv_img_create(scr);
-    lv_img_set_src(img_humi, &waterprof);
-    lv_obj_align(img_humi, LV_ALIGN_RIGHT_MID, -15, -60);
+    if (img_humi) {
+        lv_img_set_src(img_humi, &waterprof);
+        lv_obj_align(img_humi, LV_ALIGN_RIGHT_MID, -15, -60);
+        rt_kprintf("[UI] Humi icon created\n");
+    }
 
     label_humi_val = lv_label_create(scr);
-    lv_obj_set_style_text_font(label_humi_val, &lv_font_montserrat_18, 0);
-    lv_obj_set_style_text_color(label_humi_val, lv_color_black(), 0);
-    lv_label_set_text(label_humi_val, "--.-- %");
-    lv_obj_align_to(label_humi_val, img_humi, LV_ALIGN_OUT_LEFT_MID, -10, 0);
+    if (label_humi_val) {
+        lv_obj_set_style_text_font(label_humi_val, &lv_font_montserrat_18, 0);
+        lv_obj_set_style_text_color(label_humi_val, lv_color_black(), 0);
+        lv_label_set_text(label_humi_val, "--.-- %");
+        lv_obj_align_to(label_humi_val, img_humi, LV_ALIGN_OUT_LEFT_MID, -10, 0);
+        rt_kprintf("[UI] Humi label created\n");
+    }
 
     /* 5. 数据展示区：光照 */
     lv_obj_t *img_light = lv_img_create(scr);
-    lv_img_set_src(img_light, &light);
-    lv_obj_align(img_light, LV_ALIGN_LEFT_MID, 15, 0);
+    if (img_light) {
+        lv_img_set_src(img_light, &light);
+        lv_obj_align(img_light, LV_ALIGN_LEFT_MID, 15, 0);
+        rt_kprintf("[UI] Light icon created\n");
+    }
 
     label_light_val = lv_label_create(scr);
-    lv_obj_set_style_text_font(label_light_val, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(label_light_val, lv_color_black(), 0);
-    lv_label_set_text(label_light_val, "--- Lux");
-    lv_obj_align_to(label_light_val, img_light, LV_ALIGN_OUT_RIGHT_MID, 10, 0);
+    if (label_light_val) {
+        lv_obj_set_style_text_font(label_light_val, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(label_light_val, lv_color_black(), 0);
+        lv_label_set_text(label_light_val, "--- Lux");
+        lv_obj_align_to(label_light_val, img_light, LV_ALIGN_OUT_RIGHT_MID, 10, 0);
+        rt_kprintf("[UI] Light label created\n");
+    }
 
     /* 6. 倾斜角度显示区 */
     lv_obj_t *img_tilt = lv_img_create(scr);
-    lv_img_set_src(img_tilt, &tilt);
-    lv_obj_align(img_tilt, LV_ALIGN_RIGHT_MID, -15, 0);
+    if (img_tilt) {
+        lv_img_set_src(img_tilt, &tilt);
+        lv_obj_align(img_tilt, LV_ALIGN_RIGHT_MID, -15, 0);
+        rt_kprintf("[UI] Tilt icon created\n");
+    }
 
     label_tilt_x_val = lv_label_create(scr);
-    lv_obj_set_style_text_font(label_tilt_x_val, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(label_tilt_x_val, lv_color_black(), 0);
-    lv_label_set_text(label_tilt_x_val, "X: --.-");
-    lv_obj_align_to(label_tilt_x_val, img_tilt, LV_ALIGN_OUT_LEFT_MID, -5, -10);
+    if (label_tilt_x_val) {
+        lv_obj_set_style_text_font(label_tilt_x_val, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(label_tilt_x_val, lv_color_black(), 0);
+        lv_label_set_text(label_tilt_x_val, "X: --.-");
+        lv_obj_align_to(label_tilt_x_val, img_tilt, LV_ALIGN_OUT_LEFT_MID, -5, -10);
+        rt_kprintf("[UI] Tilt X label created\n");
+    }
 
     label_tilt_y_val = lv_label_create(scr);
-    lv_obj_set_style_text_font(label_tilt_y_val, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(label_tilt_y_val, lv_color_black(), 0);
-    lv_label_set_text(label_tilt_y_val, "Y: --.-");
-    lv_obj_align_to(label_tilt_y_val, label_tilt_x_val, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 2);
+    if (label_tilt_y_val) {
+        lv_obj_set_style_text_font(label_tilt_y_val, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(label_tilt_y_val, lv_color_black(), 0);
+        lv_label_set_text(label_tilt_y_val, "Y: --.-");
+        lv_obj_align_to(label_tilt_y_val, label_tilt_x_val, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 2);
+        rt_kprintf("[UI] Tilt Y label created\n");
+    }
 
     /* 7. 底部状态区 */
     label_alarm_status = lv_label_create(scr);
-    lv_obj_set_style_text_font(label_alarm_status, &my_font_cn_16, 0);
-    lv_obj_set_style_text_color(label_alarm_status, lv_color_black(), 0);
-    lv_label_set_text(label_alarm_status, "正常");
-    lv_obj_align(label_alarm_status, LV_ALIGN_BOTTOM_LEFT, 10, -10);
+    if (label_alarm_status) {
+        lv_obj_set_style_text_font(label_alarm_status, &my_font_cn_16, 0);
+        lv_obj_set_style_text_color(label_alarm_status, lv_color_black(), 0);
+        lv_label_set_text(label_alarm_status, "正常");
+        lv_obj_align(label_alarm_status, LV_ALIGN_BOTTOM_LEFT, 10, -10);
+        rt_kprintf("[UI] Alarm status label created\n");
+    }
 
     img_main_status = lv_img_create(scr);
-    lv_img_set_src(img_main_status, &Environmental);
-    lv_obj_align(img_main_status, LV_ALIGN_BOTTOM_MID, 0, -10);
+    if (img_main_status) {
+        lv_img_set_src(img_main_status, &Environmental);
+        lv_obj_align(img_main_status, LV_ALIGN_BOTTOM_MID, 0, -10);
+        rt_kprintf("[UI] Main status icon created\n");
+    }
 
     img_beep_status = lv_img_create(scr);
-    lv_img_set_src(img_beep_status, &Megaphone);
-    lv_obj_add_flag(img_beep_status, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_align(img_beep_status, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+    if (img_beep_status) {
+        lv_img_set_src(img_beep_status, &Megaphone);
+        lv_obj_add_flag(img_beep_status, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_align(img_beep_status, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+        rt_kprintf("[UI] Beep status icon created\n");
+    }
+    rt_kprintf("[UI] All UI elements created successfully\n");
 }
 
 /* ==================== LCD显示线程（LVGL版本 - 事件驱动 + 超时机制） ==================== */
@@ -405,11 +452,11 @@ static void display_thread_entry(void *parameter)
     int temp_int, temp_dec, humi_int, humi_dec;
     int tilt_x_int, tilt_x_dec, tilt_y_int, tilt_y_dec;
 
-    /* 等待UI初始化完成 */
-    rt_thread_mdelay(100);
+    rt_kprintf("[display] Thread started, initializing UI...\n");
     
     /* 初始化LVGL界面 */
     warehouse_ui_init();
+    rt_kprintf("[display] UI initialized\n");
 
     /* 初始化屏幕状态 */
     rt_mutex_take(screen_mgr.lock, RT_WAITING_FOREVER);

@@ -5,6 +5,10 @@
 #include <lvgl.h>
 #include <drv_lcd.h>
 
+/* LCD dimensions (240x240 ST7789) */
+#define LCD_W 240
+#define LCD_H 240
+
 /* LCD buffer for LVGL (1/10 screen size) */
 static lv_disp_draw_buf_t disp_buf;
 static lv_color_t buf1[LCD_W * 24];  /* 240 * 24 = 5760 pixels */
