@@ -2,16 +2,13 @@
  * LVGL Display Port for ST7789 LCD
  */
 
+#include "lv_conf.h"
 #include <lvgl.h>
 #include <drv_lcd.h>
 
-/* LCD dimensions (240x240 ST7789) */
-#define LCD_W 240
-#define LCD_H 240
-
-/* LCD buffer for LVGL (1/10 screen size) */
+/* LCD buffer for LVGL (minimal size for memory saving) */
 static lv_disp_draw_buf_t disp_buf;
-static lv_color_t buf1[LCD_W * 24];  /* 240 * 24 = 5760 pixels */
+static lv_color_t buf1[LCD_W * 5];  /* 240 * 5 = 1200 pixels */
 
 /* Flush callback: copy buffer to LCD */
 static void disp_flush(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_t *color_p)
@@ -41,7 +38,7 @@ void lv_port_disp_init(void)
     rt_kprintf("LCD cleared to white\n");
     
     /* Initialize display buffer */
-    lv_disp_draw_buf_init(&disp_buf, buf1, NULL, LCD_W * 24);
+    lv_disp_draw_buf_init(&disp_buf, buf1, NULL, LCD_W * 5);
     rt_kprintf("LVGL display buffer initialized\n");
     
     /* Initialize display driver */

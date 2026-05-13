@@ -1742,7 +1742,9 @@ lv_font_t my_font_cn_16 = {
     .underline_position = -1,
     .underline_thickness = 1,
 #endif
-    //.static_bitmap = 0,
+#if LVGL_VERSION_MAJOR == 8 && LVGL_VERSION_MINOR < 3
+    .static_bitmap = 0,
+#endif
     .dsc = &font_dsc,          /*The custom font data. Will be accessed by `get_glyph_bitmap/dsc` */
 #if LV_VERSION_CHECK(8, 2, 0) || LVGL_VERSION_MAJOR >= 9
     .fallback = NULL,
