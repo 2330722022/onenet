@@ -13,11 +13,11 @@
  *====================*/
 
 /* Memory configuration options (see lv_malloc.c for details) */
-#define LV_MEM_CUSTOM 1    /* 1: ªå (rt_malloc/rt_free) */
-#define LV_MEM_SIZE (32U * 1024U)  /* ¤§®ä?*/
-#define LV_MEM_AUTO_DEFRAG 1  /* ªå */
+#define LV_MEM_CUSTOM 1    /* 1: ï¿½ï¿½ (rt_malloc/rt_free) */
+#define LV_MEM_SIZE (32U * 1024U)  /* ï¿½ï¿½ï¿½ï¿½?*/
+#define LV_MEM_AUTO_DEFRAG 1  /* ï¿½ï¿½ */
 
-/* ªå?*/
+/* ï¿½ï¿½?*/
 #if LV_MEM_CUSTOM == 1
 #include <rtthread.h>
 #define lv_malloc(size)       rt_malloc(size)
@@ -47,17 +47,17 @@
    Feature Usage
  *========================*/
 
-#define LV_USE_ANIMATION        0  /* ¨ç¥è?*/
-#define LV_USE_SHADOW           0  /* ¥è?*/
+#define LV_USE_ANIMATION        0  /* ï¿½ï¿½ï¿½?*/
+#define LV_USE_SHADOW           0  /* ï¿½ï¿½?*/
 #define LV_USE_GROUP            1
 
 /*========================
    Drawing Settings
  *========================*/
 
-#define LV_USE_DRAW_SW 1           /* ¯ä */
-#define LV_DRAW_SW_STRIDE_ALIGN 1  /* ¯¹?*/
-#define LV_DRAW_SW_FILL_STYLE_SIMPLE 1  /* €¡«?*/
+#define LV_USE_DRAW_SW 1           /* ï¿½ï¿½ */
+#define LV_DRAW_SW_STRIDE_ALIGN 1  /* ï¿½ï¿½?*/
+#define LV_DRAW_SW_FILL_STYLE_SIMPLE 1  /* ï¿½ï¿½ï¿½?*/
 
 /*=================
    Debug Settings

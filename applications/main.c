@@ -5,6 +5,35 @@
 #include <stdlib.h>
 #include <stdio.h>
 
+/*
+ * main.c — 项目入口
+ *
+ * 版本：v2.0 稳定版
+ * 日期：2026-05-13
+ * 说明：本版本基于 RT-Thread 操作系统，使用多线程、互斥量、信号量、事件集
+ *       等 OS 原语实现各功能模块的协同工作，系统稳定运行。
+ *
+ * RT-Thread 作为资源调度者的入口职能：
+ *   - 不包含业务逻辑代码
+ *   - 仅负责 RT-Thread 同步/互斥对象的创建（由各模块 init 函数内部完成）
+ *   - 按正确顺序启动各功能模块线程
+ *   - 内存监测：记录系统启动前后的内存使用情况
+ *
+ * ⚠ LVGL 线程安全：
+ *   BSP 的 lv_port_disp_init() 内部创建了专用的 "LVGL" 线程，唯一负责调用
+ *   lv_timer_handler()。我们通过 lv_timer_create() 注册周期性回调，
+ *   回调运行在 LVGL 线程上下文中，确保所有 LVGL 操作单线程安全。
+ *
+ * 线程优先级规划：
+ *   8  — 逻辑处理线程 (app_logic)     【紧急：温度/倾斜告警立即触发BEEP+舵机】
+ *   10 — paho_mqtt 线程 (PAHO内部)
+ *   15 — OneNET 上传线程 (app_net)
+ *   18 — Web Server 线程 (app_net)
+ *   20 — LVGL 线程 (BSP内部)
+ *   23 — HTTP worker 线程 (app_net)
+ *   25 — 传感器采集线程 (app_sensor)
+ */
+
 /* 模块头文件 */
 #include "app_logic.h"
 #include "app_sensor.h"
@@ -41,17 +70,16 @@ extern const lv_img_dsc_t Megaphone;
 #define LED_R_PIN       GET_PIN(F, 12)
 
 /* ==================== 内存监测 ==================== */
-static void print_memory_info(const char *tag)
+static void print_memory(const char *tag)
 {
     rt_size_t total, used, max_used;
     rt_memory_info(&total, &used, &max_used);
     rt_kprintf("[MEM] %s - Total: %u KB, Used: %u KB (%u%%), Max Used: %u KB (%u%%)\n",
-               tag,
-               total / 1024, used / 1024, (used * 100) / total,
+               tag, total / 1024, used / 1024, (used * 100) / total,
                max_used / 1024, (max_used * 100) / total);
 }
 
-/* ==================== LVGL UI ==================== */
+/* ==================== LVGL UI 对象 ==================== */
 static lv_obj_t *img_main_status;
 static lv_obj_t *label_temp_val;
 static lv_obj_t *label_humi_val;
@@ -63,20 +91,104 @@ static lv_obj_t *img_beep_status;
 static lv_obj_t *img_wifi_status;
 static lv_obj_t *img_cloud_status;
 static lv_obj_t *label_threshold_val = RT_NULL;
+static volatile uint8_t threshold_dirty = 1;
 
-/* 重写弱符号：阈值LCD显示更新 */
+/* ==================== 阈值LCD显示更新（仅设脏标志，LVGL操作由lv_timer回调安全执行）==================== */
 void update_threshold_display(void)
 {
-    if (label_threshold_val != RT_NULL) {
-        char buf[16];
-        int th_int = (int)temp_threshold;
-        int th_dec = (int)((temp_threshold - th_int) * 10);
-        if (th_dec < 0) th_dec = -th_dec;
-        rt_snprintf(buf, sizeof(buf), "%d.%dC", th_int, th_dec);
-        lv_label_set_text(label_threshold_val, buf);
+    threshold_dirty = 1;
+}
+
+/* ==================== lv_timer 回调：唯一更新LVGL对象的入口 ==================== */
+/*
+ * 此回调由 BSP 的 LVGL 线程在 lv_timer_handler() 内调用，是唯一操作 LVGL 对象的地方。
+ * 所有其他线程（传感器/HTTP/OneNET/按键）只通过 volatile 标志位 + 共享数据间接影响。
+ */
+static void lv_ui_refresh_task(lv_timer_t *timer)
+{
+    struct sensor_data local_data;
+    char buf[32];
+
+    /* 读取传感器数据 — 非阻塞尝试，传感器线程持有锁时跳过本周期 */
+    if (rt_mutex_take(data_mutex, 1) == RT_EOK) {
+        local_data = shared_data;
+        rt_mutex_release(data_mutex);
+    } else {
+        return; /* 数据未就绪，下一轮再刷新 */
+    }
+
+    /* 温度 */
+    rt_sprintf(buf, "%d.%d C", (int)local_data.temperature,
+               abs((int)((local_data.temperature - (int)local_data.temperature) * 10)));
+    lv_label_set_text(label_temp_val, buf);
+
+    /* 湿度 */
+    rt_sprintf(buf, "%d.%d %%", (int)local_data.humidity,
+               abs((int)((local_data.humidity - (int)local_data.humidity) * 10)));
+    lv_label_set_text(label_humi_val, buf);
+
+    /* 光照 */
+    rt_sprintf(buf, "%d Lux", (int)local_data.light);
+    lv_label_set_text(label_light_val, buf);
+
+    /* 倾斜角 X/Y */
+    rt_sprintf(buf, "X:%d.%d", (int)local_data.tilt_angle_x,
+               abs((int)((local_data.tilt_angle_x - (int)local_data.tilt_angle_x) * 10)));
+    lv_label_set_text(label_tilt_x_val, buf);
+    rt_sprintf(buf, "Y:%d.%d", (int)local_data.tilt_angle_y,
+               abs((int)((local_data.tilt_angle_y - (int)local_data.tilt_angle_y) * 10)));
+    lv_label_set_text(label_tilt_y_val, buf);
+
+    /* WiFi状态 */
+    if (wifi_connected)
+        lv_img_set_src(img_wifi_status, &connected);
+
+    /* 读取业务状态 — 短超时尝试（数据锁由高优先级逻辑线程持有，短暂等待） */
+    if (rt_mutex_take(data_lock, 2) == RT_EOK) {
+        uint8_t beep = g_app_state.beep_status;
+        float threshold = g_app_state.temp_threshold;
+
+        /* 阈值LCD刷新 */
+        if (threshold_dirty) {
+            threshold_dirty = 0;
+            if (label_threshold_val != RT_NULL) {
+                int th_int = (int)threshold;
+                int th_dec = (int)((threshold - th_int) * 10);
+                if (th_dec < 0) th_dec = -th_dec;
+                rt_snprintf(buf, sizeof(buf), "%d.%dC", th_int, th_dec);
+                lv_label_set_text(label_threshold_val, buf);
+            }
+        }
+
+        /* BEEP 状态图标 */
+        if (beep)
+            lv_obj_clear_flag(img_beep_status, LV_OBJ_FLAG_HIDDEN);
+        else
+            lv_obj_add_flag(img_beep_status, LV_OBJ_FLAG_HIDDEN);
+
+        /* 告警状态 & 主图 */
+        if (local_data.temperature > threshold) {
+            lv_img_set_src(img_main_status, &Alarm);
+            lv_obj_set_style_text_color(label_temp_val, lv_palette_main(LV_PALETTE_RED), 0);
+            lv_label_set_text(label_alarm_status, "温度过高");
+            lv_obj_set_style_text_color(label_alarm_status, lv_palette_main(LV_PALETTE_RED), 0);
+        } else if (local_data.tilt_alarm) {
+            lv_img_set_src(img_main_status, &tilt);
+            lv_obj_set_style_text_color(label_temp_val, lv_color_black(), 0);
+            lv_label_set_text(label_alarm_status, "货架倾斜");
+            lv_obj_set_style_text_color(label_alarm_status, lv_palette_main(LV_PALETTE_ORANGE), 0);
+        } else {
+            lv_img_set_src(img_main_status, &Environmental);
+            lv_obj_set_style_text_color(label_temp_val, lv_color_black(), 0);
+            lv_label_set_text(label_alarm_status, "正常");
+            lv_obj_set_style_text_color(label_alarm_status, lv_palette_main(LV_PALETTE_GREEN), 0);
+        }
+
+        rt_mutex_release(data_lock);
     }
 }
 
+/* ==================== UI初始化 ==================== */
 static void warehouse_ui_init(void)
 {
     lv_obj_t *scr = lv_scr_act();
@@ -162,116 +274,49 @@ static void warehouse_ui_init(void)
     lv_obj_set_style_text_color(label_threshold_val, lv_color_hex(0x0000FF), 0);
     update_threshold_display();
     lv_obj_align_to(label_threshold_val, label_light_val, LV_ALIGN_OUT_BOTTOM_MID, 0, 25);
-}
 
-/* ==================== 显示线程 ==================== */
-static void display_thread_entry(void *parameter)
-{
-    struct sensor_data local_data;
-    struct sensor_data *data_ptr = &local_data;
-    char buf[32];
-    rt_err_t mutex_ret;
-
-    warehouse_ui_init();
-
-    while (1)
-    {
-        mutex_ret = rt_mutex_take(data_mutex, 10);
-        if (mutex_ret == RT_EOK) {
-            local_data = shared_data;
-            rt_mutex_release(data_mutex);
-            data_ptr = &local_data;
-        }
-
-        rt_sprintf(buf, "%d.%d C", (int)data_ptr->temperature,
-                   abs((int)((data_ptr->temperature - (int)data_ptr->temperature) * 10)));
-        lv_label_set_text(label_temp_val, buf);
-
-        rt_sprintf(buf, "%d.%d %%", (int)data_ptr->humidity,
-                   abs((int)((data_ptr->humidity - (int)data_ptr->humidity) * 10)));
-        lv_label_set_text(label_humi_val, buf);
-
-        rt_sprintf(buf, "%d Lux", (int)data_ptr->light);
-        lv_label_set_text(label_light_val, buf);
-
-        rt_sprintf(buf, "X:%d.%d", (int)data_ptr->tilt_angle_x,
-                   abs((int)((data_ptr->tilt_angle_x - (int)data_ptr->tilt_angle_x) * 10)));
-        lv_label_set_text(label_tilt_x_val, buf);
-        rt_sprintf(buf, "Y:%d.%d", (int)data_ptr->tilt_angle_y,
-                   abs((int)((data_ptr->tilt_angle_y - (int)data_ptr->tilt_angle_y) * 10)));
-        lv_label_set_text(label_tilt_y_val, buf);
-
-        if (wifi_connected)
-            lv_img_set_src(img_wifi_status, &connected);
-
-        if (beep_status)
-            lv_obj_clear_flag(img_beep_status, LV_OBJ_FLAG_HIDDEN);
-        else
-            lv_obj_add_flag(img_beep_status, LV_OBJ_FLAG_HIDDEN);
-
-        if (data_ptr->temperature > temp_threshold)
-        {
-            lv_img_set_src(img_main_status, &Alarm);
-            lv_obj_set_style_text_color(label_temp_val, lv_palette_main(LV_PALETTE_RED), 0);
-            lv_label_set_text(label_alarm_status, "温度过高");
-            lv_obj_set_style_text_color(label_alarm_status, lv_palette_main(LV_PALETTE_RED), 0);
-        }
-        else if (data_ptr->tilt_alarm)
-        {
-            lv_img_set_src(img_main_status, &tilt);
-            lv_obj_set_style_text_color(label_temp_val, lv_color_black(), 0);
-            lv_label_set_text(label_alarm_status, "货架倾斜");
-            lv_obj_set_style_text_color(label_alarm_status, lv_palette_main(LV_PALETTE_ORANGE), 0);
-        }
-        else
-        {
-            lv_img_set_src(img_main_status, &Environmental);
-            lv_obj_set_style_text_color(label_temp_val, lv_color_black(), 0);
-            lv_label_set_text(label_alarm_status, "正常");
-            lv_obj_set_style_text_color(label_alarm_status, lv_palette_main(LV_PALETTE_GREEN), 0);
-        }
-
-        lv_task_handler();
-        rt_thread_mdelay(200);
-    }
+    /*
+     * 注册 lv_timer 周期性刷新回调 — 200ms 周期，运行在 LVGL 线程上下文。
+     * LVGL v8 API: lv_timer_create(callback, period_ms, user_data)
+     * 这是唯一操作 LVGL 对象的地方，确保线程安全。
+     */
+    lv_timer_create(lv_ui_refresh_task, 200, NULL);
 }
 
 /* ==================== main 函数 ==================== */
 int main(void)
 {
-    print_memory_info("start");
+    print_memory("boot_start");
 
-    /* 硬件底层初始化 */
+    /* ——— 硬件底层初始化 ——— */
     rt_pin_mode(LED_R_PIN, PIN_MODE_OUTPUT);
     rt_pin_write(LED_R_PIN, PIN_HIGH);
 
-    /* 初始化LVGL */
+    /*
+     * LVGL 初始化 + UI 创建 — 在 scheduler 启动前完成，单线程安全。
+     * lv_port_disp_init() 内部创建 "LVGL" 线程(prio 20, 8KB) 负责 lv_timer_handler()。
+     * warehouse_ui_init() 注册 lv_timer 回调，后续由 LVGL 线程安全调用。
+     * ⚠ 不再创建独立的 display 线程 — 避免双线程 LVGL 竞态导致 Hard Fault。
+     */
     rt_kprintf("[main] Initializing LVGL...\n");
     lv_init();
     lv_port_disp_init();
+    warehouse_ui_init();
     rt_kprintf("[main] LVGL OK\n");
 
-    /* 初始化业务逻辑模块（BEEP、舵机、按键）*/
+    /*
+     * ——— RT-Thread 对象创建 & 模块启动 ———
+     */
     app_logic_init();
-
-    /* 初始化传感器模块（创建采集线程）*/
     app_sensor_init();
-
-    /* 初始化网络服务模块（创建Web Server线程）*/
     app_net_init();
 
-    /* 创建显示线程 */
-    rt_thread_t tid_display = rt_thread_create("display", display_thread_entry, RT_NULL,
-                                                4096, 21, 10);
-    if (tid_display) rt_thread_startup(tid_display);
+    print_memory("modules_started");
 
-    print_memory_info("modules_started");
-
-    /* 等待系统稳定，再连接WiFi */
+    /* ——— 连接 WiFi ——— */
     rt_kprintf("[main] Delaying 3s for system stabilization...\n");
     rt_thread_mdelay(3000);
 
-    /* 连接WiFi */
     int ret = wifi_connect();
     if (ret != 0)
     {
@@ -284,7 +329,7 @@ int main(void)
         app_net_onenet_start();
     }
 
-    print_memory_info("done");
+    print_memory("boot_done");
 
     while (1)
     {

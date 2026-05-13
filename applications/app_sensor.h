@@ -18,8 +18,8 @@ struct sensor_data {
 };
 
 /* 全局JSON缓冲区（零拷贝，供HTTP模块直接引用）*/
-extern char status_json[128];
-extern char data_json[128];
+extern char status_json[256];
+extern char data_json[256];
 
 /* 共享数据与互斥锁 */
 extern struct sensor_data shared_data;
