@@ -67,6 +67,8 @@
 
 ## 软件架构
 
+详细的架构分析请查看 [ARCHITECTURE_ANALYSIS.md](ARCHITECTURE_ANALYSIS.md)
+
 ```
 applications/
 ├── main.c              # 主程序入口 — OS对象创建 + 线程启动
